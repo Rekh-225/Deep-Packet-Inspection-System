@@ -1,206 +1,251 @@
-# Deep Packet Inspection (DPI) Engine
+# DPI Engine — Deep Packet Inspection System
 
-A high-performance, multi-threaded Deep Packet Inspection engine written in C++17. Reads network captures in PCAP format, classifies application traffic via TLS SNI and HTTP host extraction, enforces configurable blocking rules, and writes filtered output — all through a pipelined, lock-minimised architecture.
-
----
+A Python-based deep packet inspection engine that reads network captures (PCAP files), classifies traffic by application using protocol-level analysis, and applies configurable blocking rules.
 
 ## Features
 
-- **Application Classification** — identifies YouTube, Netflix, Facebook, Twitter, Instagram, WhatsApp, Zoom, and more from live-layer-7 payload inspection
-- **TLS SNI Extraction** — reads the Server Name Indication field from TLS Client Hello messages to classify HTTPS traffic without decryption
-- **HTTP Host Extraction** — parses the `Host:` header in plain HTTP requests as a fallback classification path
-- **Configurable Blocking Rules** — block by IP address, application type, or domain substring; rules are applied per-flow
-- **Multi-threaded Pipeline** — Reader → Load Balancer threads → Fast Path threads → Output Writer; consistent hashing ensures all packets of a flow are processed by the same thread
-- **PCAP I/O** — reads standard `.pcap` captures (Wireshark, tcpdump) and writes a filtered PCAP with only allowed traffic
-- **Per-flow Statistics** — packet/byte counters and a full classification report printed after processing
-- **Cross-platform** — builds on Linux, macOS, and Windows (MSVC, MinGW, WSL)
-
----
+- **Protocol Parsing** — Dissects Ethernet, IPv4, TCP, and UDP headers from raw packet bytes
+- **TLS SNI Extraction** — Identifies applications by extracting the Server Name Indication from TLS Client Hello handshakes
+- **HTTP Host Detection** — Extracts the `Host` header from unencrypted HTTP requests
+- **DNS Query Analysis** — Parses DNS queries to detect domain lookups
+- **Traffic Classification** — Automatically identifies 20+ applications: YouTube, Facebook, Netflix, TikTok, Discord, Spotify, Zoom, and more
+- **Blocking Rules** — Block traffic by IP address, application, domain (with wildcard support), or port
+- **Dual Engine Modes** — Single-threaded (simple) and multi-threaded (LB → FP pipeline) architectures
+- **PCAP Output** — Produces a filtered PCAP file with blocked packets removed
 
 ## Architecture
 
 ```
-┌──────────────┐
-│ Reader Thread │  (reads PCAP packets)
-└──────┬───────┘
-       │  hash(5-tuple) % N_LB
-  ┌────┴────┐
-  │ LB  LB  │  Load Balancer threads
-  └────┬────┘
-       │  hash(5-tuple) % N_FP
-┌──────┴──────────┐
-│ FP0  FP1  FP2  FP3 │  Fast Path threads — DPI, flow tracking, blocking
-└──────┬──────────┘
-       │
-┌──────┴────────┐
-│ Output Writer  │  (writes filtered PCAP)
-└───────────────┘
+                    ┌──────────────────┐
+                    │   PCAP Reader    │  Reads raw packets from file
+                    └────────┬─────────┘
+                             │
+                    ┌────────▼─────────┐
+                    │  Packet Parser   │  Ethernet → IPv4 → TCP/UDP
+                    └────────┬─────────┘
+                             │
+              ┌──────────────▼──────────────┐
+              │      DPI Inspection         │
+              │  ┌─────────────────────┐    │
+              │  │  SNI Extractor      │    │  TLS Client Hello → hostname
+              │  │  HTTP Host Extract  │    │  HTTP GET → Host header
+              │  │  DNS Extractor      │    │  DNS query → domain name
+              │  └─────────────────────┘    │
+              └──────────────┬──────────────┘
+                             │
+                    ┌────────▼─────────┐
+                    │  Classification  │  hostname → App (YouTube, etc.)
+                    └────────┬─────────┘
+                             │
+                    ┌────────▼─────────┐
+                    │  Rule Manager    │  Check block rules (IP/App/Domain)
+                    └────────┬─────────┘
+                             │
+                      ┌──────┴──────┐
+                      ▼             ▼
+                  FORWARD         DROP
+                      │
+              ┌───────▼───────┐
+              │  PCAP Writer  │  Write allowed packets to output
+              └───────────────┘
 ```
 
-Each Fast Path thread owns a private flow table, so connection state is updated without locks. Load Balancers use the same five-tuple hash to guarantee that every packet of a connection lands on the same Fast Path thread.
+### Multi-Threaded Architecture
 
----
+```
+    Reader ──┬──► LB0 ──┬──► FP0 ──┐
+             │          └──► FP1 ──┤
+             └──► LB1 ──┬──► FP2 ──┤──► Output Queue ──► Writer
+                        └──► FP3 ──┘
+```
 
-## Tech Stack
+- **Load Balancers (LB)** distribute packets to Fast Path threads using consistent hashing on the five-tuple
+- **Fast Path (FP)** threads perform DPI inspection and rule matching
+- Consistent hashing ensures all packets of the same flow land on the same FP thread
 
-| Layer | Technology |
+## Requirements
+
+- **Python 3.8+**
+- No external dependencies (uses Python standard library only)
+
+## Installation
+
+```bash
+git clone https://github.com/yourusername/DPI.git
+cd DPI
+```
+
+That's it — no `pip install` required.
+
+## Usage
+
+### Basic Processing
+
+```bash
+python cli.py input.pcap output.pcap
+```
+
+### Blocking Traffic
+
+```bash
+# Block an application
+python cli.py capture.pcap filtered.pcap --block-app YouTube
+
+# Block an IP address
+python cli.py capture.pcap filtered.pcap --block-ip 192.168.1.50
+
+# Block a domain
+python cli.py capture.pcap filtered.pcap --block-domain tiktok
+
+# Combine multiple rules
+python cli.py capture.pcap filtered.pcap \
+    --block-app YouTube \
+    --block-app TikTok \
+    --block-ip 192.168.1.50 \
+    --block-domain malware.example.com
+```
+
+### Multi-Threaded Mode
+
+```bash
+# Default: 2 load balancers, 2 fast-path threads per LB (4 total)
+python cli.py capture.pcap filtered.pcap --mode mt
+
+# Custom thread count
+python cli.py capture.pcap filtered.pcap --mode mt --lbs 4 --fps 4
+```
+
+### Generating Test Data
+
+```bash
+python generate_test_pcap.py
+# Creates test_dpi.pcap with sample TLS, HTTP, DNS, and blocked IP traffic
+```
+
+### All Options
+
+```
+usage: cli.py [-h] [--block-ip IP] [--block-app APP] [--block-domain DOMAIN]
+              [--block-port PORT] [--rules-file FILE]
+              [--mode {simple,mt}] [--lbs N] [--fps N]
+              input output
+
+positional arguments:
+  input                 Input PCAP file path
+  output                Output PCAP file path (filtered)
+
+blocking rules:
+  --block-ip IP         Block traffic from source IP (can be repeated)
+  --block-app APP       Block application: YouTube, Facebook, TikTok, etc.
+  --block-domain DOMAIN Block domain by substring match
+  --block-port PORT     Block destination port
+  --rules-file FILE     Load blocking rules from a file
+
+engine mode:
+  --mode {simple,mt}    simple (single-threaded) or mt (multi-threaded)
+  --lbs N               Number of load balancer threads (mt mode, default: 2)
+  --fps N               Fast-path threads per LB (mt mode, default: 2)
+```
+
+## Example Output
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║                      PROCESSING REPORT                     ║
+╠══════════════════════════════════════════════════════════════╣
+║ Total Packets:              77                           ║
+║ Forwarded:                  71                           ║
+║ Dropped:                     6                           ║
+║ Active Flows:               43                           ║
+╠══════════════════════════════════════════════════════════════╣
+║                   APPLICATION BREAKDOWN                    ║
+╠══════════════════════════════════════════════════════════════╣
+║ HTTPS                 39  50.6% ##########            ║
+║ Unknown               16  20.8% ####                  ║
+║ DNS                    4   5.2% #                     ║
+║ YouTube                1   1.3%                       ║
+║ Facebook               1   1.3%                       ║
+║ Netflix                1   1.3%                       ║
+║ ...                                                        ║
+╚══════════════════════════════════════════════════════════════╝
+
+[Detected Applications/Domains]
+  - www.youtube.com -> YouTube
+  - www.netflix.com -> Netflix
+  - twitter.com -> Twitter/X
+  - github.com -> GitHub
+```
+
+## Supported Applications
+
+| Application | Detection Method |
 |---|---|
-| Language | C++17 |
-| Build system | CMake 3.16+ |
-| Concurrency | `std::thread`, `std::mutex`, `std::condition_variable` |
-| Packet I/O | Custom PCAP reader/writer (no external libs required) |
-| Packet parsing | Ethernet → IPv4 → TCP/UDP header chain |
-| TLS inspection | Manual TLS record / handshake parser |
-
-No third-party runtime dependencies — the engine links only against the C++ standard library.
-
----
+| YouTube | TLS SNI (`youtube`, `ytimg`, `youtu.be`) |
+| Google | TLS SNI (`google`, `googleapis`, `gstatic`) |
+| Facebook | TLS SNI (`facebook`, `fbcdn`, `meta.com`) |
+| Instagram | TLS SNI (`instagram`, `cdninstagram`) |
+| Twitter/X | TLS SNI (`twitter`, `twimg`, `x.com`) |
+| Netflix | TLS SNI (`netflix`, `nflxvideo`) |
+| TikTok | TLS SNI (`tiktok`, `bytedance`) |
+| Discord | TLS SNI (`discord`, `discordapp`) |
+| Spotify | TLS SNI (`spotify`, `scdn.co`) |
+| Zoom | TLS SNI (`zoom`) |
+| Telegram | TLS SNI (`telegram`, `t.me`) |
+| WhatsApp | TLS SNI (`whatsapp`, `wa.me`) |
+| GitHub | TLS SNI (`github`, `githubusercontent`) |
+| Amazon/AWS | TLS SNI (`amazon`, `amazonaws`, `cloudfront`) |
+| Microsoft | TLS SNI (`microsoft`, `azure`, `office`) |
+| Apple | TLS SNI (`apple`, `icloud`, `itunes`) |
+| Cloudflare | TLS SNI (`cloudflare`) |
+| DNS | Port 53 (UDP/TCP) |
+| HTTP | Port 80 + Host header parsing |
+| HTTPS | Port 443 (fallback when SNI cannot be extracted) |
 
 ## Project Structure
 
 ```
-Deep-Packet-Inspection-System/
-├── include/
-│   ├── types.h               # FiveTuple, AppType, Flow, RawPacket
-│   ├── pcap_reader.h         # PCAP global header / packet header structs
-│   ├── packet_parser.h       # Ethernet, IP, TCP/UDP parsing
-│   ├── sni_extractor.h       # TLS Client Hello SNI parser
-│   ├── rule_manager.h        # Blocking rule storage and lookup
-│   ├── connection_tracker.h  # Per-flow state management
-│   ├── load_balancer.h       # LB thread interface
-│   ├── fast_path.h           # FP thread interface
-│   ├── thread_safe_queue.h   # Bounded, blocking concurrent queue
-│   └── dpi_engine.h          # Top-level engine orchestrator
+├── dpi/                        Core engine package
+│   ├── __init__.py             Package exports
+│   ├── types.py                Enums, data classes, SNI→App mapping
+│   ├── pcap_io.py              PCAP file reader and writer
+│   ├── packet_parser.py        Ethernet/IPv4/TCP/UDP protocol parsing
+│   ├── sni_extractor.py        TLS SNI, HTTP Host, DNS extractors
+│   ├── rule_manager.py         Blocking rules (IP, App, Domain, Port)
+│   ├── connection_tracker.py   Flow table and connection state
+│   ├── engine.py               Single-threaded DPI engine
+│   └── engine_mt.py            Multi-threaded DPI engine
 │
-├── src/
-│   ├── main_working.cpp      # Single-threaded entry point (learning / small captures)
-│   ├── dpi_mt.cpp            # Multi-threaded entry point (production)
-│   ├── pcap_reader.cpp
-│   ├── packet_parser.cpp
-│   ├── sni_extractor.cpp
-│   ├── types.cpp
-│   └── ...
-│
-├── generate_test_pcap.py     # Python script to generate synthetic test captures
-├── test_dpi.pcap             # Sample capture with mixed application traffic
-├── CMakeLists.txt
-└── WINDOWS_SETUP.md          # Detailed Windows build guide
+├── cli.py                      Command-line interface
+├── generate_test_pcap.py       Test PCAP generator
+├── test_dpi.pcap               Sample capture for testing
+├── requirements.txt            Dependencies (stdlib only)
+└── README.md
 ```
-
----
-
-## Building
-
-### Prerequisites
-
-- **Linux / macOS**: GCC 9+ or Clang 10+ with C++17 support
-- **Windows**: Visual Studio 2022, MinGW-w64, or WSL2 (see [`WINDOWS_SETUP.md`](WINDOWS_SETUP.md))
-- CMake 3.16+ (optional — direct compiler invocation also works)
-
-### Linux / macOS
-
-```bash
-# Clone and enter the repo
-git clone https://github.com/Rekh-225/Deep-Packet-Inspection-System.git
-cd Deep-Packet-Inspection-System
-
-# Build the multi-threaded engine
-g++ -std=c++17 -pthread -O2 -I include -o dpi_engine \
-    src/dpi_mt.cpp \
-    src/pcap_reader.cpp \
-    src/packet_parser.cpp \
-    src/sni_extractor.cpp \
-    src/types.cpp
-```
-
-### Windows (MSVC)
-
-```cmd
-cl /EHsc /std:c++17 /O2 /I include /Fe:dpi_engine.exe ^
-    src\dpi_mt.cpp ^
-    src\pcap_reader.cpp ^
-    src\packet_parser.cpp ^
-    src\sni_extractor.cpp ^
-    src\types.cpp
-```
-
-> For full Windows instructions see [`WINDOWS_SETUP.md`](WINDOWS_SETUP.md).
-
----
-
-## Usage
-
-```bash
-# Inspect a capture — classify and forward all traffic
-./dpi_engine input.pcap output.pcap
-
-# Block a specific application
-./dpi_engine input.pcap output.pcap --block-app YouTube
-
-# Block multiple applications and a specific IP
-./dpi_engine input.pcap output.pcap --block-app YouTube --block-app Netflix --block-ip 192.168.1.50
-
-# Block a domain (substring match)
-./dpi_engine input.pcap output.pcap --block-domain tiktok.com
-
-# Tune the thread pool (default: 2 LBs, 4 FPs)
-./dpi_engine input.pcap output.pcap --lbs 4 --fps 8
-```
-
-### Generating Test Traffic
-
-```bash
-python generate_test_pcap.py   # creates test_dpi.pcap
-./dpi_engine test_dpi.pcap filtered.pcap
-```
-
----
-
-## Sample Output
-
-```
-[DPI Engine] Processing: test_dpi.pcap
-[DPI Engine] Using 2 Load Balancers, 4 Fast Paths
-
-=== DPI Report ===
-Total packets   : 1 024
-Forwarded       : 876
-Dropped (blocked): 148
-
-Application Breakdown:
-  YouTube    :  312 packets  (30.5%)
-  Netflix    :  224 packets  (21.9%)
-  Facebook   :  188 packets  (18.4%)
-  HTTPS Other:  152 packets  (14.8%)
-  HTTP       :   96 packets   (9.4%)
-  Unknown    :   52 packets   (5.1%)
-
-Output written to: filtered.pcap
-```
-
----
 
 ## How It Works
 
-### Five-Tuple Flow Tracking
+### 1. Packet Parsing
+Raw bytes are parsed layer by layer using Python's `struct` module:
+- **Ethernet** (14 bytes): Source/destination MAC, EtherType
+- **IPv4** (20+ bytes): Source/destination IP, protocol, TTL, IP Header Length (IHL)
+- **TCP** (20+ bytes): Source/destination port, flags, sequence numbers
+- **UDP** (8 bytes): Source/destination port, length
 
-Every packet is identified by its **five-tuple** (src IP, dst IP, src port, dst port, protocol). All packets sharing a five-tuple belong to the same connection. The engine hashes this tuple to route packets consistently to one Fast Path thread, which holds the mutable flow state.
+### 2. Deep Packet Inspection
+The engine inspects the **payload** of each packet:
+- **TLS Client Hello**: Parses the TLS handshake structure, walks the extensions list, and extracts the SNI extension (type `0x0000`) to find the target hostname
+- **HTTP Request**: Searches for the `Host:` header in plaintext HTTP
+- **DNS Query**: Decodes the DNS wire format to extract the queried domain name
 
-### TLS SNI Extraction
+### 3. Flow Tracking
+Packets are grouped into **flows** using the **five-tuple** (source IP, destination IP, source port, destination port, protocol). Each flow maintains:
+- Classification state (app type, detected SNI/hostname)
+- Blocking status
+- Packet/byte counters
 
-For HTTPS traffic (destination port 443), the engine inspects the first bytes of the TCP payload. If the record content type is `0x16` (Handshake) and the handshake type is `0x01` (Client Hello), it navigates the extension list to locate extension type `0x0000` (SNI) and reads the hostname — in plaintext, before encryption begins.
-
-### Blocking Pipeline
-
-1. Packet arrives at a Fast Path thread
-2. Flow state is looked up (or created)
-3. SNI / Host is extracted if not already known for this flow
-4. Application type is resolved from the hostname
-5. Blocking rules are checked: IP blacklist → app blacklist → domain substring list
-6. Allowed packets are forwarded to the output queue; blocked packets are counted and discarded
-
----
+### 4. Consistent Hashing (Multi-threaded)
+In multi-threaded mode, the five-tuple is hashed to select both the Load Balancer and Fast Path thread. This ensures **all packets of the same flow are processed by the same thread**, enabling correct stateful flow tracking without locks on the flow table.
 
 ## License
 
-This project is open for personal and educational use.
+MIT
