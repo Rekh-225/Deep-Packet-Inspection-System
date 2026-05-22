@@ -186,8 +186,8 @@ Opened PCAP file: test_dpi.pcap
 
 [DPI] Processing packets...
 
-[BLOCKED] 192.168.1.100 -&gt; 142.250.185.110 (YouTube: www.youtube.com)
-[BLOCKED] 192.168.1.100 -&gt; 99.86.0.100 (TikTok: www.tiktok.com)
+[BLOCKED] 192.168.1.100 -> 142.250.185.110 (YouTube: www.youtube.com)
+[BLOCKED] 192.168.1.100 -> 99.86.0.100 (TikTok: www.tiktok.com)
 
 ╔══════════════════════════════════════════════════════════════╗
 ║                      PROCESSING REPORT                     ║
@@ -210,10 +210,10 @@ Opened PCAP file: test_dpi.pcap
 ╚══════════════════════════════════════════════════════════════╝
 
 [Detected Applications/Domains]
-  - www.youtube.com -&gt; YouTube
-  - www.netflix.com -&gt; Netflix
-  - twitter.com -&gt; Twitter/X
-  - github.com -&gt; GitHub
+  - www.youtube.com -> YouTube
+  - www.netflix.com -> Netflix
+  - twitter.com -> Twitter/X
+  - github.com -> GitHub
 ```
 
 ## Supported Applications
