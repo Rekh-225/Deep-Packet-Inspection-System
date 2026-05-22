@@ -16,6 +16,8 @@ A production-quality, self-contained deep packet inspection (DPI) engine for **o
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [CLI Usage](#cli-usage)
+- [Example Output](#example-output)
+- [Supported Applications](#supported-applications)
 - [Rules File Format](#rules-file-format)
 - [Testing](#testing)
 - [Performance & Scalability](#performance--scalability)
@@ -166,6 +168,77 @@ engine mode:
   --lbs N               Number of load balancer threads (mt mode, default: 2)
   --fps N               Fast-path threads per LB (mt mode, default: 2)
 ```
+
+## Example Output
+```text
+[RuleManager] Blocked app: YouTube
+[RuleManager] Blocked app: TikTok
+[RuleManager] Blocked domain: tiktok
+
+╔══════════════════════════════════════════════════════════════╗
+║                    DPI ENGINE v2.0                          ║
+╚══════════════════════════════════════════════════════════════╝
+
+Opened PCAP file: test_dpi.pcap
+  Version: 2.4
+  Snaplen: 65535 bytes
+  Link type: 1 (Ethernet)
+
+[DPI] Processing packets...
+
+[BLOCKED] 192.168.1.100 -&gt; 142.250.185.110 (YouTube: www.youtube.com)
+[BLOCKED] 192.168.1.100 -&gt; 99.86.0.100 (TikTok: www.tiktok.com)
+
+╔══════════════════════════════════════════════════════════════╗
+║                      PROCESSING REPORT                     ║
+╠══════════════════════════════════════════════════════════════╣
+║ Total Packets:              77                           ║
+║ Forwarded:                  75                           ║
+║ Dropped:                     2                           ║
+║ Active Flows:               43                           ║
+╠══════════════════════════════════════════════════════════════╣
+║                   APPLICATION BREAKDOWN                    ║
+╠══════════════════════════════════════════════════════════════╣
+║ HTTPS                 39  50.6% ##########            ║
+║ Unknown               16  20.8% ####                  ║
+║ DNS                    4   5.2% #                     ║
+║ YouTube                1   1.3%                       ║
+║ Facebook               1   1.3%                       ║
+║ Netflix                1   1.3%                       ║
+║ TikTok                 1   1.3%                       ║
+║ ...                                                        ║
+╚══════════════════════════════════════════════════════════════╝
+
+[Detected Applications/Domains]
+  - www.youtube.com -&gt; YouTube
+  - www.netflix.com -&gt; Netflix
+  - twitter.com -&gt; Twitter/X
+  - github.com -&gt; GitHub
+```
+
+## Supported Applications
+| Application | Detection Method |
+|---|---|
+| YouTube | TLS SNI (youtube, ytimg, youtu.be) |
+| Google | TLS SNI (google, googleapis, gstatic) |
+| Facebook | TLS SNI (facebook, fbcdn, meta.com) |
+| Instagram | TLS SNI (instagram, cdninstagram) |
+| Twitter/X | TLS SNI (twitter, twimg, x.com) |
+| Netflix | TLS SNI (netflix, nflxvideo) |
+| TikTok | TLS SNI (tiktok, bytedance) |
+| Discord | TLS SNI (discord, discordapp) |
+| Spotify | TLS SNI (spotify, scdn.co) |
+| Zoom | TLS SNI (zoom) |
+| Telegram | TLS SNI (telegram, t.me) |
+| WhatsApp | TLS SNI (whatsapp, wa.me) |
+| GitHub | TLS SNI (github, githubusercontent) |
+| Amazon/AWS | TLS SNI (amazon, amazonaws, cloudfront) |
+| Microsoft | TLS SNI (microsoft, azure, office) |
+| Apple | TLS SNI (apple, icloud, itunes) |
+| Cloudflare | TLS SNI (cloudflare) |
+| DNS | Port 53 (UDP/TCP) |
+| HTTP | Port 80 + Host header parsing |
+| HTTPS | Port 443 (fallback when SNI unavailable) |
 
 ## Rules File Format
 The engine supports loading/saving rules in a simple INI-like format:
