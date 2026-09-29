@@ -1,0 +1,55 @@
+{
+  "_comment": [
+    "Expected results for samples/captures, stated by construction (see samples/README.md),",
+    "not recorded from the engine. tests/test_samples.py checks both engines against them.",
+    "Counts: total = retained + rule_filtered + unsupported + malformed."
+  ],
+  "captures": {
+    "mixed_supported.pcap": {
+      "total_packets": 44, "tcp_packets": 41, "udp_packets": 3,
+      "unsupported": 0, "malformed": 0, "flows": 26,
+      "flows_by_app_no_rules": {
+        "Unknown": 8, "HTTPS": 8, "DNS": 3, "Google": 1, "YouTube": 1, "Facebook": 1,
+        "Twitter/X": 1, "Netflix": 1, "GitHub": 1, "TikTok": 1
+      },
+      "runs": {
+        "none":                 {"args": [], "rule_filtered": 0},
+        "block_streaming":      {"args": ["--rules-file", "samples/rules/block_streaming.rules"], "rule_filtered": 3},
+        "block_client_and_dns": {"args": ["--rules-file", "samples/rules/block_client_and_dns.rules"], "rule_filtered": 8},
+        "block_domain_google":  {"args": ["--block-domain", "google"], "rule_filtered": 2}
+      }
+    },
+    "mixed_unsupported.pcap": {
+      "total_packets": 48, "tcp_packets": 41, "udp_packets": 3,
+      "unsupported": 3, "malformed": 1, "flows": 26,
+      "runs": {
+        "none":                 {"args": [], "rule_filtered": 0},
+        "block_streaming":      {"args": ["--rules-file", "samples/rules/block_streaming.rules"], "rule_filtered": 3},
+        "block_client_and_dns": {"args": ["--rules-file", "samples/rules/block_client_and_dns.rules"], "rule_filtered": 8}
+      }
+    },
+    "hostile_names.pcap": {
+      "total_packets": 15, "tcp_packets": 14, "udp_packets": 1,
+      "unsupported": 0, "malformed": 0, "flows": 8,
+      "flows_by_app_no_rules": {"Unknown": 3, "HTTPS": 4, "DNS": 1},
+      "runs": {
+        "none":              {"args": [], "rule_filtered": 0},
+        "block_evil_domain": {"args": ["--rules-file", "samples/rules/block_evil_domain.rules"], "rule_filtered": 3}
+      }
+    },
+    "empty.pcap": {
+      "total_packets": 0, "tcp_packets": 0, "udp_packets": 0,
+      "unsupported": 0, "malformed": 0, "flows": 0,
+      "runs": {"none": {"args": [], "rule_filtered": 0}}
+    }
+  },
+  "rejected": {
+    "truncated_body.pcap":   {"exit_status": 1, "stderr_contains": "truncated capture"},
+    "truncated_header.pcap": {"exit_status": 1, "stderr_contains": "truncated capture"},
+    "oversized_record.pcap": {"exit_status": 1, "stderr_contains": "exceeds 65535"},
+    "nanosecond_magic.pcap": {"exit_status": 1, "stderr_contains": "nanosecond"},
+    "pcapng_stub.pcapng":    {"exit_status": 1, "stderr_contains": "pcapng"},
+    "linktype_raw.pcap":     {"exit_status": 1, "stderr_contains": "Unsupported link type 101"},
+    "short_header.pcap":     {"exit_status": 1, "stderr_contains": "Not a PCAP file"}
+  }
+}

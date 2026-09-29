@@ -14,11 +14,18 @@ Usage:
     engine.process_file("input.pcap", "output.pcap")
 """
 
-from dpi.types import AppType, ConnectionState, PacketAction, FiveTuple
+from dpi.types import (
+    AppType,
+    ConnectionState,
+    PacketAction,
+    FiveTuple,
+    ProcessingCancelled,
+    ProcessingError,
+)
 from dpi.engine import DPIEngine
 from dpi.rule_manager import RuleManager
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 __all__ = [
     "DPIEngine",
     "RuleManager",
@@ -26,4 +33,6 @@ __all__ = [
     "ConnectionState",
     "PacketAction",
     "FiveTuple",
+    "ProcessingError",
+    "ProcessingCancelled",
 ]

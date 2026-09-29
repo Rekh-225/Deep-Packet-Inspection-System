@@ -60,69 +60,97 @@ class SNIExtractor:
         """
         Extract the SNI hostname from a TLS Client Hello.
 
-        Returns the hostname string, or ``None`` if not found.
+        Every length field is honoured strictly: the handshake message must lie
+        entirely inside the declared record, the Client Hello body inside the
+        declared handshake length, the extensions block inside the body, each
+        extension inside the block, and the SNI list / entry / name inside the
+        extension.  Bytes after the declared record are never read, so a
+        truncated or inconsistent message yields ``None`` rather than a name
+        assembled from trailing data.
+
+        Returns the hostname (ASCII, 1..255 bytes), or ``None``.
         """
         if not SNIExtractor.is_tls_client_hello(payload):
             return None
 
         try:
-            offset = 5  # Skip TLS record header
+            record_len = struct.unpack_from("!H", payload, 3)[0]
+            record = payload[5: 5 + record_len]
+            if len(record) != record_len or record_len < 4:
+                return None
 
-            # Handshake header: type (1) + length (3)
-            offset += 4
+            # Handshake header: type (1) + length (3); body must be complete in the record
+            hs_len = int.from_bytes(record[1:4], "big")
+            body = record[4: 4 + hs_len]
+            if len(body) != hs_len:
+                return None
 
+            offset = 0
             # Client Hello body: version (2) + random (32)
             offset += 2 + 32
+            if offset >= len(body):
+                return None
 
             # Session ID
-            if offset >= len(payload):
-                return None
-            session_id_len = payload[offset]
+            session_id_len = body[offset]
             offset += 1 + session_id_len
+            if offset + 2 > len(body):
+                return None
 
             # Cipher suites
-            if offset + 2 > len(payload):
-                return None
-            cipher_suites_len = struct.unpack_from("!H", payload, offset)[0]
+            cipher_suites_len = struct.unpack_from("!H", body, offset)[0]
             offset += 2 + cipher_suites_len
+            if offset >= len(body):
+                return None
 
             # Compression methods
-            if offset >= len(payload):
-                return None
-            comp_len = payload[offset]
+            comp_len = body[offset]
             offset += 1 + comp_len
-
-            # Extensions
-            if offset + 2 > len(payload):
+            if offset + 2 > len(body):
                 return None
-            extensions_len = struct.unpack_from("!H", payload, offset)[0]
-            offset += 2
 
-            extensions_end = min(offset + extensions_len, len(payload))
+            # Extensions block must fit exactly inside the body
+            extensions_len = struct.unpack_from("!H", body, offset)[0]
+            offset += 2
+            extensions_end = offset + extensions_len
+            if extensions_end > len(body):
+                return None
 
             # Walk extensions looking for SNI (type 0x0000)
             while offset + 4 <= extensions_end:
-                ext_type = struct.unpack_from("!H", payload, offset)[0]
-                ext_len  = struct.unpack_from("!H", payload, offset + 2)[0]
+                ext_type = struct.unpack_from("!H", body, offset)[0]
+                ext_len  = struct.unpack_from("!H", body, offset + 2)[0]
                 offset += 4
-
-                if offset + ext_len > extensions_end:
-                    break
+                ext_end = offset + ext_len
+                if ext_end > extensions_end:
+                    return None   # extension overruns the block: structurally invalid
 
                 if ext_type == _EXTENSION_SNI:
-                    # SNI extension structure:
-                    #   list_length (2) + type (1) + name_length (2) + name
-                    if ext_len < 5:
-                        break
-                    sni_type = payload[offset + 2]
-                    sni_len  = struct.unpack_from("!H", payload, offset + 3)[0]
-                    if sni_type != _SNI_TYPE_HOSTNAME:
-                        break
-                    if sni_len > ext_len - 5:
-                        break
-                    return payload[offset + 5: offset + 5 + sni_len].decode("ascii", errors="replace")
+                    # SNI extension: list_length (2) + [type (1) + name_length (2) + name]...
+                    if ext_len < 2:
+                        return None
+                    list_len = struct.unpack_from("!H", body, offset)[0]
+                    list_end = offset + 2 + list_len
+                    if list_end > ext_end:
+                        return None
+                    pos = offset + 2
+                    while pos + 3 <= list_end:
+                        entry_type = body[pos]
+                        name_len = struct.unpack_from("!H", body, pos + 1)[0]
+                        name_end = pos + 3 + name_len
+                        if name_end > list_end:
+                            return None
+                        if entry_type == _SNI_TYPE_HOSTNAME:
+                            if name_len == 0 or name_len > 255:
+                                return None
+                            try:
+                                return body[pos + 3: name_end].decode("ascii")
+                            except UnicodeDecodeError:
+                                return None
+                        pos = name_end
+                    return None   # SNI extension present but no host_name entry
 
-                offset += ext_len
+                offset = ext_end
 
         except (struct.error, IndexError):
             pass
@@ -170,10 +198,16 @@ class HTTPHostExtractor:
                 end += 1
 
             if end > start:
-                host = payload[start:end].decode("ascii", errors="replace").strip()
+                try:
+                    host = payload[start:end].decode("ascii").strip()
+                except UnicodeDecodeError:
+                    return None
                 # Remove port if present
                 if ":" in host:
                     host = host.split(":")[0]
+                # Bound like a DNS name; longer or empty values are not a host name.
+                if not host or len(host) > 255:
+                    return None
                 return host
 
         return None
@@ -199,29 +233,53 @@ class DNSExtractor:
 
     @staticmethod
     def extract_query(payload: bytes) -> Optional[str]:
-        """Extract the queried domain name from a DNS query payload."""
+        """
+        Extract the first question name from a DNS query payload.
+
+        The question must be complete: every label fully present (length
+        1..63), a terminating zero label, and the 4-byte QTYPE / QCLASS after
+        it.  Compression pointers (label byte >= 0xC0) are not supported in the
+        question section and are rejected explicitly; label bytes 0x40..0xBF
+        are invalid.  Anything incomplete or inconsistent yields ``None`` --
+        never a partial name.  Name is limited to 253 characters.
+        """
         if not DNSExtractor.is_dns_query(payload):
             return None
 
         offset = 12  # Skip DNS header
         labels: list[str] = []
+        total = 0
 
         try:
-            while offset < len(payload):
+            while True:
+                if offset >= len(payload):
+                    return None                       # ran out before the terminator
                 label_len = payload[offset]
+                offset += 1
                 if label_len == 0:
                     break
+                if label_len >= 0xC0:
+                    return None                       # compression pointer: unsupported here
                 if label_len > 63:
-                    break  # Compression pointer or invalid
-                offset += 1
+                    return None                       # reserved / invalid label type
                 if offset + label_len > len(payload):
-                    break
-                labels.append(payload[offset: offset + label_len].decode("ascii", errors="replace"))
+                    return None                       # label cut short
+                total += label_len + 1
+                if total > 254:                       # wire form without terminator; 253 chars printed
+                    return None
+                try:
+                    labels.append(payload[offset: offset + label_len].decode("ascii"))
+                except UnicodeDecodeError:
+                    return None
                 offset += label_len
+            if not labels:
+                return None                           # root name: nothing to report
+            if offset + 4 > len(payload):
+                return None                           # QTYPE / QCLASS missing
         except IndexError:
-            pass
+            return None
 
-        return ".".join(labels) if labels else None
+        return ".".join(labels)
 
 
 # =============================================================================

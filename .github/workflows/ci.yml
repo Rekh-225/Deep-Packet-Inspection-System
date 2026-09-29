@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    name: unittest (py${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.8", "3.10", "3.12", "3.13"]
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Byte-compile
+        run: python -m compileall -q dpi cli.py demo.py generate_test_pcap.py tests samples benchmarks tools
+
+      - name: Sample captures are reproducible
+        run: python samples/make_samples.py --check
+
+      - name: Run tests (includes clean-venv install test)
+        run: python -m unittest discover -s tests -v
+
+      - name: Install package and smoke-test the entry point
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check .
+          cd "$RUNNER_TEMP"
+          dpi-engine --version
+          dpi-engine "$GITHUB_WORKSPACE/samples/captures/mixed_supported.pcap" out_simple.pcap \
+              --rules-file "$GITHUB_WORKSPACE/samples/rules/block_streaming.rules" \
+              --report-json simple.json --report-no-timestamp
+          dpi-engine "$GITHUB_WORKSPACE/samples/captures/mixed_supported.pcap" out_mt.pcap --mode mt --lbs 2 --fps 2 \
+              --rules-file "$GITHUB_WORKSPACE/samples/rules/block_streaming.rules" \
+              --report-json mt.json --report-html mt.html --report-no-timestamp
+          cmp out_simple.pcap out_mt.pcap
+          python - <<'EOF'
+          import json
+          a = json.load(open("simple.json")); b = json.load(open("mt.json"))
+          for r in (a, b):
+              r["run"].pop("mode"); r["run"].pop("threads", None); r["run"].pop("output")
+          assert a == b, "simple and mt reports differ"
+          assert a["accounting"]["rule_filtered"] == 3 and a["accounting"]["reconciles"]
+          EOF
+
+      - name: Rejected input exits nonzero and leaves no output
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          set +e
+          dpi-engine "$GITHUB_WORKSPACE/samples/captures/truncated_body.pcap" never.pcap --mode mt
+          status=$?
+          set -e
+          test "$status" -eq 1
+          test ! -e never.pcap
+          test ! -e never.pcap.partial
+
+      - name: Demo runs
+        run: python demo.py --out "${{ runner.temp }}/demo_out"

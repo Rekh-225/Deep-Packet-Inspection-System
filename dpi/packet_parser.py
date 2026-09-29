@@ -80,9 +80,15 @@ class ParsedPacket:
     seq_number: int = 0
     ack_number: int = 0
 
-    # Payload
+    # Payload (bounded by the IP total length / UDP length, never by captured bytes
+    # or Ethernet padding)
     payload_offset: int = 0
     payload_length: int = 0
+
+    # IPv4 fragmentation: True when MF is set or the fragment offset is non-zero.
+    # Such packets are well-formed but cannot be inspected without reassembly
+    # (out of scope) -> "unsupported"; no transport fields are parsed for them.
+    is_fragment: bool = False
 
 
 # =============================================================================
@@ -96,7 +102,26 @@ class PacketParser:
     def parse(data: bytes, ts_sec: int = 0, ts_usec: int = 0) -> Optional[ParsedPacket]:
         """
         Parse a raw packet and return a ``ParsedPacket``, or ``None`` if the
-        packet is too short or not IPv4.
+        packet is *malformed*.
+
+        Malformed vs unsupported (precedence: structural checks first)
+        ---------------------------------------------------------------
+        ``None`` (malformed) means header fields are inconsistent with each
+        other or with the captured bytes: frame shorter than an Ethernet
+        header; IPv4 ethertype but version != 4, IHL < 5, total length < IHL*4,
+        or total length larger than the captured bytes (declared bytes missing);
+        TCP data offset < 5 or TCP header longer than the IP payload; UDP length
+        < 8 or longer than the IP payload.
+
+        A returned packet with ``has_ip`` False, or with ``has_ip`` True but
+        neither ``has_tcp`` nor ``has_udp`` (non-TCP/UDP protocol, or an IPv4
+        fragment -- ``is_fragment``), is *unsupported*: well-formed as far as we
+        parse it, but not something this tool inspects.
+
+        Transport parsing is confined to the declared IP total length; bytes
+        beyond it (Ethernet padding) are never treated as payload.  A PCAP
+        record whose original length exceeds its captured length is fine as
+        long as the IP datagram itself is complete within the captured bytes.
         """
         pkt = ParsedPacket(timestamp_sec=ts_sec, timestamp_usec=ts_usec)
         offset = 0
@@ -112,7 +137,7 @@ class PacketParser:
 
         # --- IPv4 ---
         if pkt.ether_type != ETHERTYPE_IPV4:
-            return pkt  # Not IPv4 — return what we have
+            return pkt  # Not IPv4 — unsupported, return what we have
 
         if len(data) < offset + MIN_IP_HEADER_LEN:
             return None
@@ -128,6 +153,17 @@ class PacketParser:
         if ip_header_len < MIN_IP_HEADER_LEN or len(data) < offset + ip_header_len:
             return None
 
+        total_length = struct.unpack_from("!H", data, offset + 2)[0]
+        if total_length < ip_header_len:
+            return None
+        ip_end = offset + total_length
+        if ip_end > len(data):
+            return None   # datagram declares bytes that were not captured
+
+        flags_frag = struct.unpack_from("!H", data, offset + 6)[0]
+        more_fragments = bool(flags_frag & 0x2000)
+        fragment_offset = flags_frag & 0x1FFF
+
         pkt.ttl      = data[offset + 8]
         pkt.protocol = data[offset + 9]
 
@@ -142,9 +178,19 @@ class PacketParser:
         pkt.has_ip = True
         offset += ip_header_len
 
+        if more_fragments or fragment_offset != 0:
+            # Well-formed but needs reassembly: unsupported.  Do not read a
+            # transport header from fragment payload bytes.
+            pkt.is_fragment = True
+            pkt.payload_offset = ip_end
+            pkt.payload_length = 0
+            return pkt
+
+        ip_payload_len = ip_end - offset
+
         # --- TCP ---
         if pkt.protocol == PROTO_TCP:
-            if len(data) < offset + MIN_TCP_HEADER_LEN:
+            if ip_payload_len < MIN_TCP_HEADER_LEN:
                 return None
 
             pkt.src_port   = struct.unpack_from("!H", data, offset)[0]
@@ -157,30 +203,38 @@ class PacketParser:
 
             pkt.tcp_flags = data[offset + 13]
 
-            if tcp_header_len < MIN_TCP_HEADER_LEN or len(data) < offset + tcp_header_len:
+            if tcp_header_len < MIN_TCP_HEADER_LEN or tcp_header_len > ip_payload_len:
                 return None
 
             pkt.has_tcp = True
             offset += tcp_header_len
+            payload_end = ip_end
 
         # --- UDP ---
         elif pkt.protocol == PROTO_UDP:
-            if len(data) < offset + UDP_HEADER_LEN:
+            if ip_payload_len < UDP_HEADER_LEN:
                 return None
 
             pkt.src_port  = struct.unpack_from("!H", data, offset)[0]
             pkt.dest_port = struct.unpack_from("!H", data, offset + 2)[0]
+            udp_length    = struct.unpack_from("!H", data, offset + 4)[0]
+
+            if udp_length < UDP_HEADER_LEN or udp_length > ip_payload_len:
+                return None
 
             pkt.has_udp = True
+            payload_end = offset + udp_length
             offset += UDP_HEADER_LEN
 
-        # --- Payload ---
-        if offset < len(data):
-            pkt.payload_offset = offset
-            pkt.payload_length = len(data) - offset
         else:
-            pkt.payload_offset = len(data)
+            # Other IP protocol: unsupported; nothing more to parse.
+            pkt.payload_offset = ip_end
             pkt.payload_length = 0
+            return pkt
+
+        # --- Payload (bounded by the declared lengths, not the frame) ---
+        pkt.payload_offset = offset
+        pkt.payload_length = max(0, payload_end - offset)
 
         return pkt
 

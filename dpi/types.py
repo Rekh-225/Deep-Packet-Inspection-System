@@ -8,6 +8,7 @@ throughout the packet inspection pipeline.
 from __future__ import annotations
 
 import struct
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -126,6 +127,25 @@ class Connection:
     syn_ack_seen: bool = False
     fin_seen:     bool = False
 
+    # Observed application-layer metadata (what was actually seen on the wire).
+    # ``sni`` above is the "best name" used for rule matching; these keep the
+    # per-protocol values apart for reporting.
+    tls_sni:    str = ""
+    http_host:  str = ""
+    dns_query:  str = ""
+
+    # How ``app_type`` was decided: "tls_sni", "http_host", "dns_port",
+    # "port_fallback" or "none" (unknown).  Heuristic only.
+    classified_by: str = "none"
+
+    # Rule that blocked the flow, e.g. ("app", "YouTube"); empty if not blocked.
+    block_rule_type:   str = ""
+    block_rule_detail: str = ""
+
+    # Packet ids (input order) bounding the flow, -1 if unknown.
+    first_packet_id: int = -1
+    last_packet_id:  int = -1
+
 
 # =============================================================================
 # Packet wrapper for passing between processing stages
@@ -142,6 +162,7 @@ class PacketJob:
     payload_length: int = 0
     ts_sec:         int = 0
     ts_usec:        int = 0
+    orig_len:       int = 0         # PCAP record's original wire length (may exceed len(data))
 
 
 # =============================================================================
@@ -150,7 +171,19 @@ class PacketJob:
 
 @dataclass
 class DPIStats:
-    """Engine-wide processing statistics."""
+    """
+    Engine-wide processing statistics.
+
+    Accounting categories (every packet read lands in exactly one):
+
+    * ``forwarded_packets``   retained -- supported, no rule matched, written
+    * ``dropped_packets``     rule-filtered -- supported, flow matched a rule
+    * ``unsupported_packets`` parsed but not IPv4 TCP/UDP; never inspected, not written
+    * ``malformed_packets``   could not be parsed; not written
+    * ``failed_packets``      admitted but never decided (run aborted)
+
+    ``reconciles()`` is True iff the categories sum to ``total_packets``.
+    """
     total_packets:     int = 0
     total_bytes:       int = 0
     forwarded_packets: int = 0
@@ -159,6 +192,76 @@ class DPIStats:
     udp_packets:       int = 0
     other_packets:     int = 0
     active_connections: int = 0
+    unsupported_packets: int = 0
+    malformed_packets:   int = 0
+    failed_packets:      int = 0
+
+    @property
+    def accounted_packets(self) -> int:
+        return (
+            self.forwarded_packets + self.dropped_packets
+            + self.unsupported_packets + self.malformed_packets + self.failed_packets
+        )
+
+    def reconciles(self) -> bool:
+        return self.accounted_packets == self.total_packets
+
+
+# =============================================================================
+# Errors
+# =============================================================================
+
+class ProcessingError(Exception):
+    """The engine could not produce a complete, trustworthy output."""
+
+
+class ProcessingCancelled(ProcessingError):
+    """Processing was cancelled before completion (``cancel()`` or Ctrl-C)."""
+
+
+class FlowCapacityExceeded(ProcessingError):
+    """Accepting one more flow would exceed the configured global flow limit."""
+
+
+# =============================================================================
+# Global flow-state capacity
+# =============================================================================
+
+class FlowCapacity:
+    """
+    One deterministic limit on the number of tracked flows for a whole run.
+
+    Shared by every ``ConnectionTracker`` of an engine (one in the simple
+    engine, one per fast path in the multi-threaded engine) so the limit does
+    not scale with worker count.  When the limit would be exceeded the run
+    fails with ``FlowCapacityExceeded`` instead of silently evicting flow
+    state -- evicting a blocked flow's classification would let later packets
+    of that flow through.
+
+    Default 200 000 flows.  Thread-safe.
+    """
+
+    DEFAULT_MAX_FLOWS = 200_000
+
+    def __init__(self, max_flows: int = DEFAULT_MAX_FLOWS) -> None:
+        if max_flows < 1:
+            raise ValueError("max_flows must be >= 1")
+        self.max_flows = max_flows
+        self._count = 0
+        self._lock = threading.Lock()
+
+    @property
+    def count(self) -> int:
+        return self._count
+
+    def acquire(self) -> None:
+        with self._lock:
+            if self._count >= self.max_flows:
+                raise FlowCapacityExceeded(
+                    f"flow limit reached: this run already tracks {self._count} flows and the "
+                    f"configured maximum is {self.max_flows} (--max-flows); output not committed"
+                )
+            self._count += 1
 
 
 # =============================================================================

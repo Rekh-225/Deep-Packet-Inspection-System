@@ -8,14 +8,14 @@ stores classification results, and supports stale-connection eviction.
 
 from __future__ import annotations
 
-import time
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 from dpi.types import (
     AppType,
     Connection,
     ConnectionState,
     FiveTuple,
+    FlowCapacity,
     PacketAction,
 )
 
@@ -27,11 +27,17 @@ class ConnectionTracker:
     In the multi-threaded engine each Fast Path thread owns its own
     ``ConnectionTracker`` (no sharing required, because consistent
     hashing ensures the same flow always lands on the same thread).
+
+    Capacity is governed by a ``FlowCapacity`` shared across all trackers of a
+    run, so the limit is the same whatever the thread layout.  There is no
+    silent eviction: dropping a flow's state could forward packets of a flow
+    that was already blocked.  Exceeding the limit raises
+    ``FlowCapacityExceeded`` and the run fails.
     """
 
-    def __init__(self, tracker_id: int = 0, max_connections: int = 100_000) -> None:
+    def __init__(self, tracker_id: int = 0, capacity: Optional[FlowCapacity] = None) -> None:
         self._id = tracker_id
-        self._max_connections = max_connections
+        self._capacity = capacity if capacity is not None else FlowCapacity()
         self._connections: dict[FiveTuple, Connection] = {}
 
         # Lifetime stats
@@ -39,20 +45,25 @@ class ConnectionTracker:
         self._classified_count: int = 0
         self._blocked_count: int = 0
 
+    @property
+    def capacity(self) -> FlowCapacity:
+        return self._capacity
+
     # -----------------------------------------------------------------
     # Connection Management
     # -----------------------------------------------------------------
 
     def get_or_create(self, tuple_: FiveTuple) -> Connection:
-        """Return the existing connection for *tuple_*, or create a new one."""
+        """
+        Return the existing connection for *tuple_*, or create a new one.
+
+        Raises ``FlowCapacityExceeded`` if creating it would exceed the shared limit.
+        """
         conn = self._connections.get(tuple_)
         if conn is not None:
             return conn
 
-        # Evict oldest if at capacity
-        if len(self._connections) >= self._max_connections:
-            self._evict_oldest()
-
+        self._capacity.acquire()
         conn = Connection(tuple=tuple_)
         self._connections[tuple_] = conn
         self._total_seen += 1
@@ -129,16 +140,5 @@ class ConnectionTracker:
         for conn in self._connections.values():
             callback(conn)
 
-    # -----------------------------------------------------------------
-    # Internals
-    # -----------------------------------------------------------------
-
-    def _evict_oldest(self) -> None:
-        """Remove the connection with the smallest packet count (LRU-ish)."""
-        if not self._connections:
-            return
-        min_key = min(
-            self._connections,
-            key=lambda k: self._connections[k].packets_in + self._connections[k].packets_out,
-        )
-        del self._connections[min_key]
+    def iter_connections(self) -> Iterator[Connection]:
+        return iter(self._connections.values())
