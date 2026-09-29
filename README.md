@@ -1,411 +1,347 @@
-# DPI Engine — Deep Packet Inspection System
+# DPI Engine
 
-A Python-based deep packet inspection engine that reads network captures (PCAP files), classifies traffic by application using protocol-level analysis, and applies configurable blocking rules.
+**An offline deep-packet-inspection tool that reads a network capture, works out which services each connection was talking to, filters packets by rule, and writes a new capture plus a report, without ever producing a half-finished result.**
 
-## Features
+Pure Python, standard library only, one `pip install`. Built as a learning project in network security and concurrent systems, and then reworked after a line-by-line review found that the original multi-threaded engine could silently lose packets. The second half of this README is about what that review found and how it was fixed, because that is where most of the engineering is.
 
-- **Protocol Parsing** — Dissects Ethernet, IPv4, TCP, and UDP headers from raw packet bytes
-- **TLS SNI Extraction** — Identifies applications by extracting the Server Name Indication from TLS Client Hello handshakes
-- **HTTP Host Detection** — Extracts the `Host` header from unencrypted HTTP requests
-- **DNS Query Analysis** — Parses DNS queries to detect domain lookups
-- **Traffic Classification** — Automatically identifies 20+ applications: YouTube, Facebook, Netflix, TikTok, Discord, Spotify, Zoom, and more
-- **Blocking Rules** — Block traffic by IP address, application, domain (with wildcard support), or port
-- **Dual Engine Modes** — Single-threaded (simple) and multi-threaded (LB → FP pipeline) architectures
-- **PCAP Output** — Produces a filtered PCAP file with blocked packets removed
-
-## Architecture
-
-```
-                    ┌──────────────────┐
-                    │   PCAP Reader    │  Reads raw packets from file
-                    └────────┬─────────┘
-                             │
-                    ┌────────▼─────────┐
-                    │  Packet Parser   │  Ethernet → IPv4 → TCP/UDP
-                    └────────┬─────────┘
-                             │
-              ┌──────────────▼──────────────┐
-              │      DPI Inspection         │
-              │  ┌─────────────────────┐    │
-              │  │  SNI Extractor      │    │  TLS Client Hello → hostname
-              │  │  HTTP Host Extract  │    │  HTTP GET → Host header
-              │  │  DNS Extractor      │    │  DNS query → domain name
-              │  └─────────────────────┘    │
-              └──────────────┬──────────────┘
-                             │
-                    ┌────────▼─────────┐
-                    │  Classification  │  hostname → App (YouTube, etc.)
-                    └────────┬─────────┘
-                             │
-                    ┌────────▼─────────┐
-                    │  Rule Manager    │  Check block rules (IP/App/Domain)
-                    └────────┬─────────┘
-                             │
-                      ┌──────┴──────┐
-                      ▼             ▼
-                  FORWARD         DROP
-                      │
-              ┌───────▼───────┐
-              │  PCAP Writer  │  Write allowed packets to output
-              └───────────────┘
+```bash
+pip install .
+dpi-engine capture.pcap filtered.pcap --block-app YouTube --report-html report.html
 ```
 
-### Multi-Threaded Architecture
+---
 
-```
-    Reader ──┬──► LB0 ──┬──► FP0 ──┐
-             │          └──► FP1 ──┤
-             └──► LB1 ──┬──► FP2 ──┤──► Output Queue ──► Writer ──► out.pcap
-                        └──► FP3 ──┘
-      └── unsupported / malformed packets ──────────────►┘
-```
+## Contents
 
-- **Load Balancers (LB)** dispatch packets to the Fast Path threads they own
-- **Fast Path (FP)** threads perform DPI inspection and rule matching, each with its own flow table
-- **Writer** restores input order and is the only thread that touches the output file
-- Both engines share one implementation of classification and rule evaluation (`dpi/inspection.py`), and the test suite asserts that they produce byte-identical output and identical statistics
+- [Who this is for](#who-this-is-for)
+- [What it does](#what-it-does)
+- [Quick start](#quick-start)
+- [Using it](#using-it)
+  - [Rules](#rules)
+  - [Reports](#reports)
+  - [Exit status: what the number means](#exit-status-what-the-number-means)
+  - [Multi-threaded mode](#multi-threaded-mode)
+- [How it works](#how-it-works)
+- [What it will not do](#what-it-will-not-do)
+- [The engineering story](#the-engineering-story)
+- [Guarantees, limits and accounting](#guarantees-limits-and-accounting)
+- [Tests and benchmarks](#tests-and-benchmarks)
+- [Repository layout](#repository-layout)
+- [License](#license)
 
-#### Lifecycle (how completion is determined)
+---
 
-There are no fixed sleeps or timed shutdowns. Completion is established by explicit stage signals:
+## Who this is for
 
-1. **Admission.** The reader assigns every packet a contiguous `packet_id` in file order and takes one permit from a bounded *window* semaphore (`queue_size`, default 10 000) before admitting it. Supported packets (IPv4 TCP/UDP) go to an LB; unsupported and malformed packets are sent straight to the writer as *completions*. When the window is full, the reader blocks. This is the only backpressure mechanism, and it bounds every queue and the writer's reorder buffer.
-2. **End of input.** The reader sends one end-of-input sentinel to every LB. Each LB forwards the sentinel to every FP it owns and exits. Each FP posts a *done* marker on the output queue and exits. Queues are FIFO, so a marker always trails every completion that stage produced.
-3. **Ordered retirement.** The writer buffers completions by `packet_id` and retires them strictly in input order, releasing one window permit per retired packet. Filtered, unsupported and malformed packets produce completions too, so ids are contiguous and the writer never waits for an id that will not arrive. It finishes when it has received a done marker from every FP.
-4. **Finalisation.** The main thread joins every thread (in short polls, so Ctrl-C is delivered promptly), checks that the accounting reconciles (`total == retained + filtered + unsupported + malformed`), and only then moves the uniquely named temporary file (`.<output>.XXXXXX.partial`, created exclusively in the destination directory) to `<output>`. Pre-existing files — including any user file that merely ends in `.partial` — are never opened or deleted; the destination is replaced only by a successful commit.
+- **Students and self-learners** who want to see, concretely, what a network capture contains, how encrypted traffic still reveals the server it is talking to, and how a packet filter decides what to drop. Everything runs on the synthetic samples in this repo; you do not need to capture anything yourself.
+- **People cleaning up a capture** before sharing it: strip a particular device, a streaming service, or a domain out of a `.pcap` and get an exact account of what was removed.
+- **Anyone interested in concurrent pipelines in Python**: the multi-threaded engine is a small but complete worked example of bounded queues, ordered output, clean shutdown, cancellation and honest failure accounting, with a deterministic test for every one of those properties.
 
-**Failure and cancellation.** Every blocking queue/semaphore operation polls a shared stop flag, so an exception in any stage — even with every queue full — unwinds all the others without deadlock. A worker, reader or writer exception, the flow limit, `engine.cancel()`, or an accounting mismatch discards the temporary output and raises `ProcessingError` (the specific subclass is preserved — `FlowCapacityExceeded`, `PcapFormatError`, `PcapWriteError`). Ctrl-C at *any* point — startup, reading, sentinel signalling, joining a slow worker, finalisation — cancels, unblocks and joins every stage (tolerating repeated interrupts), closes the reader, removes the temporary output, and raises `ProcessingCancelled`; if cleanup itself fails, the message names the file left behind rather than claiming success. A Ctrl-C that arrives after the output was committed leaves the completed output in place. The CLI maps these to exit status 1 / 130.
+If you have never worked with packets before, the short glossary at the start of [How it works](#how-it-works) covers everything you need.
 
-**Flow-state capacity.** Both engines share one global `--max-flows` limit (default 200 000) through a single `FlowCapacity` counter — one flow table in the simple engine, one per fast path in the MT engine, all drawing from the same limit — so the amount of state retained does not depend on the thread layout. Flow state is never evicted silently: dropping a blocked flow's classification would let later packets of that flow through, and the two engines would then diverge. When admitting one more flow would exceed the limit, the run fails with `FlowCapacityExceeded` (exit 1), reports the limit, and commits nothing.
+## What it does
 
-**Aborted-run accounting.** When a run fails or is cancelled the engine reports, precisely: *admitted* (packets read and given an id), *decided* (admitted packets whose outcome was determined by the reader or a fast path — a decision may still be waiting in the reorder buffer), *retired* (decided packets the writer processed in order; only these appear in the terminal categories), *decided but not yet retired*, *undecided* (admitted − decided), and whether the input was fully read (the number of unread packets is otherwise unknown and is not guessed). `failed_packets` = admitted − retired, so `reconciles()` still holds.
+Given a saved capture (`.pcap`), the engine:
 
-#### Routing and flow affinity
+1. Reads every packet in order and checks that it is structurally sound. Damaged packets and kinds of traffic the tool does not understand (IPv6, ARP, fragments, ...) are counted and set aside, never guessed about.
+2. Groups packets into flows (conversations between two endpoints) and looks for the three names that stay visible even when traffic is encrypted: the **TLS server name (SNI)**, the **HTTP `Host` header**, and **DNS query names**.
+3. Labels each flow by matching that name against a small table of well-known services (YouTube, Netflix, GitHub, Facebook, Zoom, ...). No match means the honest label **Unknown**. A label is only "this flow appears to contact that service"; the tool never presents it as evidence of anything malicious, and the reports say so in as many words.
+4. Applies your rules (block by app, domain, source IP, destination port) and writes a **new capture with the matching packets removed**. Retained packets are byte-for-byte identical, in their original order, with their original timestamps and lengths.
+5. Prints a summary, and optionally writes a **JSON report** (for scripts) and a **static HTML report** (for people) listing every flow: endpoints, observed names, label, matching rule, final action, and a packet tally that must add up before the run is declared a success.
 
-`flow_hash` is a CRC-32 of the *canonical* five-tuple (the two `(ip, port)` endpoints sorted, plus protocol), so both directions of a connection hash identically. The LB is `h % num_lbs` and the FP within that LB is `(h // num_lbs) % fps_per_lb`; the quotient makes the second choice independent of the first so every FP is reachable. (The previous implementation used `h % num_lbs` and `h % fps_per_lb`, which are correlated — with the default 2×2 layout two of the four FPs never received a packet.)
+It works on files only. It does not capture live traffic and it is not a firewall.
 
-*Directional vs bidirectional:* **routing** is bidirectional (A→B and B→A always land on the same FP), but **flow state** is directional — the flow table key is the exact `(src, dst, sport, dport, proto)` tuple, so the two directions of a TCP connection are tracked, classified and blocked separately. This matches the single-threaded engine: a rule that matches the client's TLS Client Hello blocks the client→server direction from that packet on; server→client packets are not blocked. That is existing behaviour and is preserved deliberately.
+## Quick start
 
-#### Packet accounting
-
-Every packet read lands in exactly one category, and the report shows all of them:
-
-| Category | Meaning | In output? |
-|---|---|---|
-| Retained (`forwarded_packets`) | IPv4 TCP/UDP, no rule matched | yes |
-| Rule-filtered (`dropped_packets`) | IPv4 TCP/UDP, flow matched a rule | no |
-| Unsupported (`unsupported_packets`) | parsed but not IPv4 + TCP/UDP (ARP, IPv6, ICMP, VLAN-tagged, …) | **no** |
-| Malformed (`malformed_packets`) | headers truncated / inconsistent | **no** |
-| Failed (`failed_packets`) | admitted but not retired when the run aborted (see *Aborted-run accounting* for the decided/undecided split) | run fails |
-
-Unsupported and malformed packets are **not** written: the engine only forwards traffic it was able to inspect. With no blocking rules, a capture consisting only of supported packets is reproduced exactly; a capture containing other protocols is not, and the report says so. `DPIStats.reconciles()` is checked by the MT engine before an output is committed.
-
-## Requirements
-
-- **Python 3.8+**
-- No external dependencies (uses Python standard library only)
-
-## Installation
+Requires Python 3.8 or newer. There are no third-party dependencies.
 
 ```bash
 git clone https://github.com/Rekh-225/Deep-Packet-Inspection-System.git
 cd Deep-Packet-Inspection-System
-python -m pip install .        # installs the `dpi-engine` command (stdlib only, no dependencies)
+python -m pip install .
 dpi-engine --version
 ```
 
-Running from the checkout without installing also works: `python cli.py …` or
-`python -m dpi …`. All three invocations take the same arguments.
-
-The concise guide is [`docs/USAGE.md`](docs/USAGE.md); sample captures with
-expected results are in [`samples/`](samples/README.md); `python demo.py` runs
-them and writes filtered captures plus reports to `demo_out/`.
-
-## Usage
-
-### Basic Processing
+Then run the demo. It processes the bundled synthetic captures with three rule sets and deliberately feeds the tool one broken file so you can see how it refuses:
 
 ```bash
-dpi-engine input.pcap output.pcap
+python demo.py
 ```
 
-### Blocking Traffic
+Filtered captures and reports land in `demo_out/`. Open any `.report.html` in a browser.
+
+You can also run from the checkout without installing: `python cli.py ...` or `python -m dpi ...` take exactly the same arguments.
+
+## Using it
 
 ```bash
-# Block an application
-dpi-engine capture.pcap filtered.pcap --block-app YouTube
+# Inspect only: keep everything, write a report of what is in the file
+dpi-engine capture.pcap out.pcap --report-html report.html
 
-# Block an IP address
-dpi-engine capture.pcap filtered.pcap --block-ip 192.168.1.50
+# Remove two streaming services and everything sent by one machine
+dpi-engine capture.pcap out.pcap --block-app YouTube --block-app Netflix --block-ip 192.168.1.50
 
-# Block a domain
-dpi-engine capture.pcap filtered.pcap --block-domain tiktok
+# Remove anything whose name mentions "tiktok", plus all DNS on port 53
+dpi-engine capture.pcap out.pcap --block-domain tiktok --block-port 53
 
-# Combine multiple rules
-dpi-engine capture.pcap filtered.pcap \
-    --block-app YouTube \
-    --block-app TikTok \
-    --block-ip 192.168.1.50 \
-    --block-domain malware.example.com
+# Same rules from a file, JSON report for further processing
+dpi-engine capture.pcap out.pcap --rules-file my.rules --report-json run.json
 ```
 
-### Multi-Threaded Mode
+The console summary looks like this (a real run over `samples/captures/mixed_supported.pcap` with `samples/rules/block_streaming.rules`):
 
-```bash
-# Default: 2 load balancers, 2 fast-path threads per LB (4 total)
-dpi-engine capture.pcap filtered.pcap --mode mt
-
-# Custom thread count
-dpi-engine capture.pcap filtered.pcap --mode mt --lbs 4 --fps 4
+```
+║ Total Packets:              44                           ║
+║ Retained (written):         41                           ║
+║ Rule-filtered:               3                           ║
+║ Unsupported:                 0                           ║
+║ Malformed:                   0                           ║
+║ Active Flows:               26                           ║
+╠══════════════════════════════════════════════════════════════╣
+║                   APPLICATION BREAKDOWN                    ║
+║ HTTPS                 24  54.5% ##########            ║
+║ Unknown                8  18.2% ###                   ║
+║ DNS                    3   6.8% #                     ║
+║ YouTube                1   2.3%                       ║
+║ Netflix                1   2.3%                       ║
+║ TikTok                 1   2.3%                       ║
+...
+[Detected Applications/Domains]
+  - www.netflix.com -> Netflix
+  - github.com -> GitHub
+  - www.example.org -> HTTPS
 ```
 
-Both modes produce byte-identical output for the same input and rules. The `mt` mode exists to demonstrate a correct pipelined design (bounded queues, ordered output, explicit completion); because the work is pure Python under the GIL and every packet crosses three queues, **it is not faster than `simple` mode**. Measured after the review repairs on a 51 000-packet synthetic capture (best of 3, one Windows laptop, Python 3.13): `simple` ≈ 46 kpps; `mt` ≈ 27–29 kpps for every layout from 1×1 to 2×4 (details and history in `benchmarks/README.md`). Measure on your own hardware before assuming otherwise.
+`Retained + Rule-filtered + Unsupported + Malformed` always equals `Total`. If it does not, the run fails instead of printing the table.
 
-### Exit Status
+### Rules
 
-| Code | Meaning |
-|---|---|
-| 0 | complete output written, and every requested report |
-| 1 | processing failed (unreadable/unsupported/truncated input, unwritable output, worker error, flow limit exceeded, accounting mismatch) — no output file is left at the destination |
-| 2 | usage error, or the `--rules-file` could not be loaded |
-| 3 | **capture completed; report failed** — the output PCAP is complete and in place, but at least one requested report could not be written; stderr lists which outputs exist and which failed |
-| 130 | cancelled (Ctrl-C) before the output was committed — no output file is left |
+Four kinds, combinable, repeatable on the command line or grouped in a file:
 
-### Limits
+| Rule | Flag | Matches |
+|---|---|---|
+| Application | `--block-app YouTube` | flows classified as that app (see the table in [How it works](#how-it-works)) |
+| Domain | `--block-domain tiktok` or `--block-domain "*.example.com"` | case-insensitive substring, or suffix wildcard, against the observed SNI / Host / DNS name |
+| Source IP | `--block-ip 192.168.1.50` | packets **from** that address |
+| Destination port | `--block-port 53` | packets **to** that port |
 
-| Limit | Option | Default | Bounds |
-|---|---|---|---|
-| Packet window | `--queue-size N` (mt) | 10 000 | packets admitted but not yet retired, i.e. every stage queue and the writer's reorder buffer |
-| Active flow state | `--max-flows N` | 200 000 | tracked flows for the whole run, **identical in both modes**; exceeding it is a controlled failure (exit 1), never silent eviction |
-| Report detail | `--max-report-detail N` | 10 000 | detected names and blocked-flow entries kept for the console/report; overflow is counted and shown as truncated |
-| Report flow list | `--report-max-flows N` | 1 000 | flows listed in JSON/HTML; the true total is always recorded |
+A rules file is plain text with four optional sections:
 
-`queue_size` is not a bound on total process memory: flow state grows with distinct flows up to `--max-flows`, and report detail up to `--max-report-detail`.
+```ini
+[BLOCKED_IPS]
+192.168.1.50
 
-### Generating Test Data
+[BLOCKED_APPS]
+YouTube
+Netflix
 
-```bash
-python generate_test_pcap.py
-# Creates test_dpi.pcap with sample TLS, HTTP, DNS, and blocked IP traffic
+[BLOCKED_DOMAINS]
+tiktok
+*.ads.example
+
+[BLOCKED_PORTS]
+53
 ```
 
-### Running the Tests
-
-```bash
-python -m unittest discover -s tests -v                      # full suite
-DPI_SKIP_INSTALL_TEST=1 python -m unittest discover -s tests # skip the ~25 s clean-venv install test
-python benchmarks/bench.py                                   # throughput and classification agreement (see benchmarks/README.md)
-python tools/make_release.py                                 # local release archive under release/ (never uploaded)
-```
-
-The suite runs in CI (`.github/workflows/ci.yml`) on Linux and Windows across Python 3.8–3.13, then installs the package into a clean interpreter and smoke-tests the `dpi-engine` command in both modes, including a failing run exiting nonzero.
-
-**Sample provenance.** `samples/captures/` are synthetic, generated deterministically by `samples/make_samples.py` from IANA documentation addresses; expected results in `samples/expected.json` are stated by construction and checked by `tests/test_samples.py`. Details: [`samples/README.md`](samples/README.md).
-
-**Fixture provenance.** `test_dpi.pcap` is produced by `generate_test_pcap.py`, a standalone packet crafter that does not use the DPI parser. `tests/fixtures.py` is a second, independent, fully deterministic crafter (no randomness) whose fixtures carry expectations stated by construction (e.g. "44 supported, 3 unsupported, 1 malformed"). Engine tests compare against those numbers and against the single-threaded engine, not against previously recorded MT output. The only value pinned from the implementation itself is the CRC-32 `flow_hash` regression check, and the test says so.
+Once a flow matches a rule, every later packet in that flow direction is dropped too. Blocking is directional, which matches how the original single-threaded engine behaved: a rule that matches a client's TLS handshake blocks client-to-server packets from that point on; the server's replies are not blocked.
 
 ### Reports
 
 ```bash
-dpi-engine capture.pcap filtered.pcap --block-app YouTube \
-    --report-json run.json --report-html run.html [--report-max-flows 500]
+dpi-engine capture.pcap out.pcap --report-json run.json --report-html run.html
 ```
 
-Reports list every flow (bounded by `--report-max-flows`, default 1000, with
-the true total recorded) with its endpoints, packet/byte counts, the observed
-TLS SNI / HTTP Host / DNS query name (kept separate), the heuristic
-classification (`Unknown` is kept distinct from a positive match), the rule
-that matched, the final action, plus the run's accounting and rules. The HTML
-is static (no scripts, restrictive CSP) and every captured string is escaped
-and clipped. Reports are written only after a complete, reconciled run.
-Examples: [`samples/reports/`](samples/reports/).
+Both reports contain the same data: the run's accounting and rules, and one entry per flow with its endpoints, packet and byte counts, the observed TLS SNI / HTTP Host / DNS name (kept as three separate fields), the heuristic label, the rule that matched, and the final action. Sample reports are in [`samples/reports/`](samples/reports/).
 
-Classification is a heuristic pattern match on names and ports. It indicates
-which service a flow *appears* to contact; it is **not** evidence of malicious
-traffic, and the reports say so.
+This is the HTML report for the run shown above (`mixed_supported.pcap` with YouTube, Netflix and TikTok blocked). Dropped flows are highlighted, the caveat about heuristic classification is the first thing on the page, and the accounting block shows the totals reconciling:
 
-### All Options
+<p align="center">
+  <img src="docs/images/report-html.png" alt="HTML report: caveat banner, run details, rules in effect, accounting that reconciles, packets by heuristic class, and a per-flow table with three dropped flows highlighted" width="820">
+</p>
 
-```
-usage: dpi-engine [-h] [--version] [--block-ip IP] [--block-app APP]
-                  [--block-domain DOMAIN] [--block-port PORT] [--rules-file FILE]
-                  [--mode {simple,mt}] [--lbs N] [--fps N] [--queue-size N]
-                  [--report-json FILE] [--report-html FILE]
-                  [--report-max-flows N] [--report-no-timestamp]
-                  input output
+<sub>Rendered from <code>samples/reports/mixed_supported.block_streaming.report.html</code>, a synthetic capture; all addresses are from IANA documentation ranges.</sub>
 
-positional arguments:
-  input                 Input PCAP file path
-  output                Output PCAP file path (filtered)
+Two things worth knowing:
 
-blocking rules:
-  --block-ip IP         Block traffic from source IP (can be repeated)
-  --block-app APP       Block application: YouTube, Facebook, TikTok, etc.
-  --block-domain DOMAIN Block domain by substring match, or *.suffix wildcard
-  --block-port PORT     Block destination port
-  --rules-file FILE     Load blocking rules from a file
+- The HTML is static: no JavaScript, a restrictive Content-Security-Policy, and every captured string is HTML-escaped and length-clipped. The `hostile_names` sample carries names like `<script>alert(1)</script>` specifically to prove this.
+- Reports are bounded. By default at most 1 000 flows are listed (`--report-max-flows`), and the true total is always recorded alongside. Aggregate counts are exact regardless of the cap.
 
-engine mode:
-  --mode {simple,mt}    simple (single-threaded) or mt (multi-threaded)
-  --lbs N               Number of load balancer threads (mt mode, default: 2)
-  --fps N               Fast-path threads per LB (mt mode, default: 2)
-  --queue-size N        Max packets in flight (mt mode, default: 10000)
+### Exit status: what the number means
 
-reports (written only after a successful run):
-  --report-json FILE    Write a JSON report to FILE
-  --report-html FILE    Write a static HTML report to FILE
-  --report-max-flows N  List at most N flows in reports (default: 1000)
-  --report-no-timestamp Omit the generation timestamp (reproducible output)
+Automation should be able to trust the exit code, so each one means exactly one thing:
+
+| Code | Meaning | Is there an output `.pcap`? |
+|---|---|---|
+| `0` | complete output written, and every requested report | yes, complete |
+| `1` | processing failed: unreadable, unsupported or truncated input, unwritable output, worker error, flow limit exceeded, accounting mismatch | **no** |
+| `2` | usage error, or the `--rules-file` could not be loaded | no |
+| `3` | **capture completed; report failed**: the `.pcap` is complete, but at least one report could not be written. stderr lists which outputs exist and which failed | yes, complete |
+| `130` | cancelled with Ctrl-C before the output was committed | no |
+
+The output file is written to a uniquely named temporary file next to the destination and moved into place only at the very end, after every packet has been accounted for. Whatever goes wrong, you will never find a partial `.pcap` at the destination path.
+
+### Multi-threaded mode
+
+```bash
+dpi-engine capture.pcap out.pcap --mode mt              # 2 load balancers x 2 workers
+dpi-engine capture.pcap out.pcap --mode mt --lbs 4 --fps 2
 ```
 
-### Supported Input
+Both modes produce **byte-identical output and identical statistics** for the same input and rules; the test suite asserts this across several thread layouts.
 
-Classic `.pcap` only (magic `0xA1B2C3D4`, either byte order, microsecond
-timestamps, Ethernet link type). pcapng, nanosecond pcap, other link types,
-files shorter than the 24-byte header, records longer than 65 535 bytes and
-truncated captures are **rejected with exit status 1** and a specific message
-— a truncated capture is never processed "up to the cut". See
-[`docs/USAGE.md`](docs/USAGE.md) for the full list of supported protocol cases.
+Be aware that `mt` mode is **not faster** in CPython. The work is pure Python under the GIL and every packet crosses three queues. Measured on a 51 000-packet synthetic capture on one Windows laptop (Python 3.13, best of 3): `simple` about 46 000 packets/s, `mt` about 27 000 to 29 000 packets/s for every layout tried. The mode exists to demonstrate a *correct* pipelined design, and the benchmark exists to keep that claim honest. Details in [`benchmarks/README.md`](benchmarks/README.md).
 
-## Example Output
+## How it works
 
-```
-╔══════════════════════════════════════════════════════════════╗
-║                      PROCESSING REPORT                     ║
-╠══════════════════════════════════════════════════════════════╣
-║ Total Packets:              77                           ║
-║ Retained (written):         71                           ║
-║ Rule-filtered:               6                           ║
-║ Unsupported:                 0                           ║
-║ Malformed:                   0                           ║
-║ Active Flows:               43                           ║
-╠══════════════════════════════════════════════════════════════╣
-║                   APPLICATION BREAKDOWN                    ║
-╠══════════════════════════════════════════════════════════════╣
-║ HTTPS                 39  50.6% ##########            ║
-║ Unknown               16  20.8% ####                  ║
-║ DNS                    4   5.2% #                     ║
-║ YouTube                1   1.3%                       ║
-║ Facebook               1   1.3%                       ║
-║ Netflix                1   1.3%                       ║
-║ ...                                                        ║
-╚══════════════════════════════════════════════════════════════╝
+**A five-line glossary.** Network data travels as *packets*, each with addressing headers and a payload. A *`.pcap` file* is a recording of packets made by a tool like Wireshark or `tcpdump`. A *flow* is all packets between the same two endpoints (IP address + port on each side, plus protocol). Most traffic today is encrypted with *TLS*, but the very first message of a TLS connection carries the server's name in clear text, the *SNI*. *DNS* is the lookup that turns a name into an address, and it is also sent in clear text.
 
-[Detected Applications/Domains]
-  - www.youtube.com -> YouTube
-  - www.netflix.com -> Netflix
-  - twitter.com -> Twitter/X
-  - github.com -> GitHub
-```
-
-## Supported Applications
-
-| Application | Detection Method |
-|---|---|
-| YouTube | TLS SNI (`youtube`, `ytimg`, `youtu.be`) |
-| Google | TLS SNI (`google`, `googleapis`, `gstatic`) |
-| Facebook | TLS SNI (`facebook`, `fbcdn`, `meta.com`) |
-| Instagram | TLS SNI (`instagram`, `cdninstagram`) |
-| Twitter/X | TLS SNI (`twitter`, `twimg`, `x.com`) |
-| Netflix | TLS SNI (`netflix`, `nflxvideo`) |
-| TikTok | TLS SNI (`tiktok`, `bytedance`) |
-| Discord | TLS SNI (`discord`, `discordapp`) |
-| Spotify | TLS SNI (`spotify`, `scdn.co`) |
-| Zoom | TLS SNI (`zoom`) |
-| Telegram | TLS SNI (`telegram`, `t.me`) |
-| WhatsApp | TLS SNI (`whatsapp`, `wa.me`) |
-| GitHub | TLS SNI (`github`, `githubusercontent`) |
-| Amazon/AWS | TLS SNI (`amazon`, `amazonaws`, `cloudfront`) |
-| Microsoft | TLS SNI (`microsoft`, `azure`, `office`) |
-| Apple | TLS SNI (`apple`, `icloud`, `itunes`) |
-| Cloudflare | TLS SNI (`cloudflare`) |
-| DNS | Port 53 (UDP/TCP) |
-| HTTP | Port 80 + Host header parsing |
-| HTTPS | Port 443 (fallback when SNI cannot be extracted) |
-
-## Project Structure
+### Pipeline
 
 ```
-├── dpi/                        Core engine package
-│   ├── __init__.py             Package exports
-│   ├── types.py                Enums, data classes, SNI→App mapping
-│   ├── pcap_io.py              PCAP file reader and writer
-│   ├── packet_parser.py        Ethernet/IPv4/TCP/UDP protocol parsing
-│   ├── sni_extractor.py        TLS SNI, HTTP Host, DNS extractors
-│   ├── rule_manager.py         Blocking rules (IP, App, Domain, Port)
-│   ├── connection_tracker.py   Flow table and connection state
-│   ├── inspection.py           Shared classify + rule decision logic, packet categories
-│   ├── engine.py               Single-threaded DPI engine (reference)
-│   ├── engine_mt.py            Multi-threaded DPI engine
-│   ├── report.py               Bounded JSON / escaped static HTML reports
-│   ├── cli.py                  Command-line interface (`dpi-engine` entry point)
-│   └── __main__.py             `python -m dpi`
-│
-├── tests/                      unittest suite
-│   ├── fixtures.py             Independent deterministic packet/PCAP builders
-│   ├── test_engine_mt.py       Routing, ordering, lifecycle, failures, equivalence
-│   ├── test_report.py          Report consistency, bounds, escaping
-│   ├── test_samples.py         Sample expectations and rejected-input contract
-│   ├── test_cli.py             Exit-status contract
-│   ├── test_install.py         Clean-venv `pip install .` + `dpi-engine`
-│   └── ...                     Unit tests per module
-├── samples/                    Synthetic captures, rules, expected.json, sample reports
-├── docs/USAGE.md               Concise usage guide and supported-input contract
-├── docs/REVIEW_REPAIRS.md      Findings from the local review, root causes, contracts
-├── LICENSE                     MIT
-├── benchmarks/                 bench.py + README with the last measured run
-├── tools/make_release.py       Builds a local release archive under release/
-├── demo.py                     Short demo over the samples (writes demo_out/)
-├── .github/workflows/ci.yml    CI: tests + install + CLI smoke tests on Linux/Windows
-├── pyproject.toml              Packaging (setuptools, stdlib only)
-├── cli.py                      Compatibility launcher for `python cli.py`
-├── generate_test_pcap.py       Legacy test PCAP generator
-├── test_dpi.pcap               Legacy sample capture used by unit tests
-├── requirements.txt            Dependencies (stdlib only)
-└── README.md
+ .pcap ──► Reader ──► Parser ──► Inspector ──► Classifier ──► Rules ──► Writer ──► .pcap
+           frames    Ethernet    TLS SNI       name ──► app    keep /    ordered,
+           in order  IPv4        HTTP Host     or Unknown      drop      atomic
+                     TCP/UDP     DNS query
 ```
 
-## How It Works
+1. **Reader** (`dpi/pcap_io.py`) validates the file header, then yields records with their timestamp, captured length and original wire length. Anything that is not a classic Ethernet `.pcap` is rejected up front with a specific message.
+2. **Parser** (`dpi/packet_parser.py`) walks Ethernet, IPv4 and TCP/UDP headers, checking every declared length against every other and against the bytes actually present. Transport parsing is confined to the IP datagram, so Ethernet padding is never mistaken for payload.
+3. **Inspector** (`dpi/sni_extractor.py`) tries to read a TLS ClientHello SNI (port 443), an HTTP `Host` (port 80) or a DNS question name (port 53) from the payload. Every length field must be internally consistent; if the message is truncated or malformed the result is *no name*, never a partial one.
+4. **Classifier** (`dpi/types.py`, `dpi/inspection.py`) maps the name to an application via a pattern table, falls back to a port-based `HTTPS` / `HTTP` / `DNS` label, and otherwise says `Unknown`.
+5. **Rules** (`dpi/rule_manager.py`) decide keep or drop per flow; the flow's state (`dpi/connection_tracker.py`) remembers the decision for the rest of the flow.
+6. **Writer** writes retained packets, in input order, to a temporary file that is committed only when the accounting reconciles.
 
-### 1. Packet Parsing
-Raw bytes are parsed layer by layer using Python's `struct` module:
-- **Ethernet** (14 bytes): Source/destination MAC, EtherType
-- **IPv4** (20+ bytes): Source/destination IP, protocol, TTL, IP Header Length (IHL)
-- **TCP** (20+ bytes): Source/destination port, flags, sequence numbers
-- **UDP** (8 bytes): Source/destination port, length
+The classification and rule logic lives in one module (`dpi/inspection.py`) that both engines call, which is why they cannot drift apart.
 
-### 2. Deep Packet Inspection
-The engine inspects the **payload** of each packet:
-- **TLS Client Hello**: Parses the TLS handshake structure, walks the extensions list, and extracts the SNI extension (type `0x0000`) to find the target hostname
-- **HTTP Request**: Searches for the `Host:` header in plaintext HTTP
-- **DNS Query**: Decodes the DNS wire format to extract the queried domain name
+### Recognised applications
 
-### 3. Flow Tracking
-Packets are grouped into **flows** using the **five-tuple** (source IP, destination IP, source port, destination port, protocol). Each flow maintains:
-- Classification state (app type, detected SNI/hostname)
-- Blocking status
-- Packet/byte counters
+| Application | Name patterns | | Application | Name patterns |
+|---|---|---|---|---|
+| YouTube | `youtube`, `ytimg`, `youtu.be` | | Discord | `discord`, `discordapp` |
+| Google | `google`, `googleapis`, `gstatic` | | Spotify | `spotify`, `scdn.co` |
+| Facebook | `facebook`, `fbcdn`, `meta.com` | | Zoom | `zoom` |
+| Instagram | `instagram`, `cdninstagram` | | Telegram | `telegram`, `t.me` |
+| Twitter/X | `twitter`, `twimg`, `x.com` | | WhatsApp | `whatsapp`, `wa.me` |
+| Netflix | `netflix`, `nflxvideo` | | GitHub | `github`, `githubusercontent` |
+| TikTok | `tiktok`, `bytedance` | | Amazon/AWS | `amazon`, `amazonaws`, `cloudfront` |
+| Microsoft | `microsoft`, `azure`, `office` | | Apple | `apple`, `icloud`, `itunes` |
+| Cloudflare | `cloudflare` | | DNS / HTTP / HTTPS | by port, when no name matched |
 
-### 4. Consistent Hashing (Multi-threaded)
-In multi-threaded mode, the canonical five-tuple is hashed once; the LB index and the FP index are derived from independent parts of that hash (see *Routing and flow affinity* above). This ensures **all packets of the same flow — in both directions — are processed by the same thread**, enabling correct stateful flow tracking without locks on the flow table.
+This is a substring match on a hostname. It is deliberately simple and it is a heuristic: it tells you which service a flow *appears* to contact, and nothing more.
 
-## Parser Limits
+## What it will not do
 
-The engine is a teaching-scale inspector. Be aware of what it does **not** do:
+Being clear about scope is part of the design. The engine:
 
-- **Link layer:** only Ethernet (`LINKTYPE_ETHERNET` = 1) captures are accepted; any other PCAP link type is rejected when the file is opened (exit 1). Frames whose EtherType is not IPv4 (802.1Q VLAN tags, ARP, PPPoE, MPLS, …) are *unsupported*.
-- **Network layer:** IPv4 only. IPv6 is *unsupported*. The header is validated before anything else is read: version 4, IHL ≥ 5, total length ≥ IHL×4 and ≤ captured bytes — otherwise the packet is *malformed*. Transport parsing is confined to the declared total length, so Ethernet padding is never treated as payload. IPv4 fragments (MF set or non-zero offset) are *unsupported* — no transport header is read from fragment payload, and fragments are not reassembled.
-- **Transport:** TCP and UDP only; ICMP and everything else is *unsupported*. TCP data offset must be ≥ 5 and the header must fit in the IP payload; UDP length must be ≥ 8 and fit in the IP payload — otherwise *malformed*. Payload is bounded by the IP total length (TCP) or the UDP length. There is **no TCP stream reassembly**: a TLS Client Hello or HTTP request that is split across segments, or that does not start at the beginning of a segment, will not be recognised.
-- **Malformed vs unsupported:** structural checks come first. A packet whose headers are inconsistent with each other or with the captured bytes is *malformed* even if it would also have been unsupported. Both are counted and excluded from the output. A PCAP record whose original length exceeds its captured length is fine as long as the IP datagram itself is complete within the captured bytes.
-- **Application data:** a payload that fails validation (truncated or inconsistent TLS record/handshake/extension/SNI lengths, incomplete DNS question, over-long or non-ASCII names) yields **no name** — never a partial one — and cannot match a domain rule. This does not change the packet's category: it is still a valid TCP/UDP packet, so it is retained (or filtered by IP/port/app rules) and its flow keeps the port heuristic (`HTTPS`/`HTTP`/`DNS`).
-- **TLS:** SNI is read from a Client Hello only when it appears on destination port 443 in a single segment, with every length field (record, handshake, extensions, extension, SNI list, name) consistent. Names are ASCII, 1–255 bytes. Other ports, session resumption without SNI, ESNI/ECH, and QUIC are not classified beyond a port-based `HTTPS` fallback. (`QUICSNIExtractor` exists but is not wired into the engines.)
-- **HTTP:** the `Host` header is read from requests on destination port 80 whose method is one of GET/POST/PUT/HEAD/DELETE/PATCH/OPTIONS; ASCII, ≤ 255 characters. Other ports and HTTP/2 are not parsed.
-- **DNS:** the first question name is decoded from UDP/TCP port-53 payloads that are standard queries (QR=0, QDCOUNT>0) with a complete QNAME (labels 1–63 bytes, terminating zero) followed by QTYPE and QCLASS; ≤ 253 characters. Compression pointers in the question are rejected. DNS-over-TCP carries a 2-byte length prefix that the extractor does not skip, so names in TCP DNS are generally not extracted (the flow is still classified `DNS` by port). Responses and DoH/DoT are not handled.
-- **PCAP format:** classic `.pcap` with microsecond timestamps in either byte order. Nanosecond-magic files and `.pcapng` are rejected.
-- **Rules:** domain rules are case-insensitive substring matches (or `*.suffix` wildcards) against the extracted SNI / Host / DNS name; IP rules match the **source** IP only; port rules match the **destination** port only.
+- **Reads files only.** No live capture, no interception, no injection.
+- **Accepts classic `.pcap` on Ethernet only.** `.pcapng`, nanosecond-timestamp `.pcap`, and other link types are rejected with exit 1. Convert first with `editcap -F pcap in.pcapng out.pcap` (Wireshark tools).
+- **Inspects IPv4 TCP and UDP only.** IPv6, ARP, ICMP, VLAN-tagged frames and IPv4 fragments are counted as *unsupported* and excluded from the output. They are never forwarded uninspected.
+- **Does not reassemble TCP streams.** A TLS handshake or HTTP request split across segments is not recognised; the flow keeps its port-based label.
+- **Does not decode QUIC, HTTP/2, DNS responses, DNS-over-TCP names, DoH/DoT, or ESNI/ECH.**
+- **Excludes what it cannot inspect.** With no rules, a capture made only of supported packets is reproduced exactly; a capture containing other protocols is not, and the summary says so.
 
-Unsupported and malformed packets are counted and excluded from the output — see *Packet accounting*.
+The full protocol-by-protocol contract, including which malformed conditions are detected, is in [`docs/USAGE.md`](docs/USAGE.md).
+
+## The engineering story
+
+The first version of this project had a working single-threaded engine and a multi-threaded engine that *appeared* to work: it ran, printed a report, and wrote an output file. A careful review, reproducing each suspicion with a deterministic test before touching any code, found that it was quietly wrong in several ways:
+
+- **It stopped on a timer.** Shutdown was "sleep, then clear a running flag". Any packet still in a queue when the timer fired was dropped, and the run reported success.
+- **It swallowed worker errors.** An exception in a worker thread printed a traceback and the main thread carried on, committing whatever output existed.
+- **It wrote packets in completion order, not input order.** A slow worker meant a scrambled capture.
+- **Half its workers never received a packet.** Routing used `hash % 2` twice in a row, so the two choices were correlated and two of the default four workers sat idle.
+- **Its accounting ignored packets it could not parse**, so the totals did not match the single-threaded engine on the same file.
+
+Fixing these properly meant redesigning the pipeline around explicit completion rather than time: every packet receives a contiguous id; a bounded window of admitted-but-unfinished packets provides backpressure and bounds every queue; each stage propagates an end-of-input sentinel and posts a done marker; the writer retires packets strictly by id; and the output is committed only when every id has been retired and the categories sum to the total. Every blocking operation polls a shared stop flag, so a failure in one stage unwinds all of the others even with every queue full.
+
+A second review of the repaired engine then found a further set of subtler problems, each again reproduced before being fixed:
+
+| Finding | What could happen | Fix |
+|---|---|---|
+| Flow table capacity scaled with thread count | after 100 000 flows a blocked flow's state was evicted in one mode but not the other, so the two engines produced different output and a blocked flow slipped through | one global `--max-flows` limit shared by both engines; exceeding it is a controlled failure, never silent eviction |
+| IPv4 / UDP lengths not validated | inconsistent packets were forwarded; a fragment's payload could be misread as a TCP header and matched by a port rule | every length checked against every other; fragments are unsupported and never transport-parsed |
+| Ctrl-C while joining threads | skipped cleanup, left a `.partial` file open and two threads alive | the whole lifecycle is under one interruption-safe path that cancels, joins, closes and discards, tolerating repeated interrupts |
+| Truncated TLS / DNS payloads | yielded partial names (`www`) that could match domain rules | strict bounds on every TLS and DNS length field; malformed application data yields no name |
+| Original wire length lost | output records said 54/54 where the input said 54/60 | `orig_len` carried through the job to the writer |
+| Fixed `output.partial` temp name | could truncate and then delete a user's file of that name | exclusively-created unique temp file; failures normalised to one exception type; cleanup leftovers named, never hidden |
+| Aborted runs called every unretired packet "undecided" | diagnostics overstated how much work was lost | separate admitted / decided / retired counters with precise definitions |
+| Report detail unbounded | detection history grew without limit on large captures | bounded detail with explicit truncation notice; aggregates stay exact |
+| Report failure returned exit 1 | callers could not tell "no output" from "output fine, report failed" | distinct exit 3, "capture completed; report failed" |
+
+Every row in that table has a regression test named after it. The full write-up with root causes and the resulting contracts is in [`docs/REVIEW_REPAIRS.md`](docs/REVIEW_REPAIRS.md).
+
+The takeaway this project is meant to demonstrate is not "multi-threading is hard", although it is. It is that a program can run, print a plausible report and exit zero while being wrong, and that the cure is to make success a *proven* state (ids retired, categories reconciled, file committed) rather than the absence of a visible crash.
+
+## Guarantees, limits and accounting
+
+**Packet categories.** Every packet read lands in exactly one:
+
+| Category | Meaning | In output? |
+|---|---|---|
+| Retained | IPv4 TCP/UDP, no rule matched | yes |
+| Rule-filtered | IPv4 TCP/UDP, flow matched a rule | no |
+| Unsupported | parsed, but not IPv4 + TCP/UDP (ARP, IPv6, ICMP, VLAN, fragments) | no |
+| Malformed | headers truncated or inconsistent with each other or with the captured bytes | no |
+
+Structural checks come first: a packet that is both inconsistent and of an unsupported type is *malformed*. A `.pcap` record whose original length exceeds its captured length is fine as long as the IP datagram is complete within the captured bytes.
+
+**Aborted runs** (failure or Ctrl-C) report *admitted* (read and given an id), *decided* (outcome determined, possibly still waiting in the reorder buffer), *retired* (written or accounted in order), *undecided* (admitted minus decided), and whether the input was fully read. The number of unread packets is not guessed.
+
+**Limits**, each independent and each documented:
+
+| Limit | Flag | Default | What it bounds |
+|---|---|---|---|
+| Packet window | `--queue-size N` (mt) | 10 000 | packets admitted but not yet retired: every queue and the reorder buffer |
+| Flow state | `--max-flows N` | 200 000 | tracked flows for the run, identical in both modes; exceeding it fails the run |
+| Report detail | `--max-report-detail N` | 10 000 | detected names and blocked-flow entries kept; overflow is counted and shown |
+| Report flow list | `--report-max-flows N` | 1 000 | flows listed in JSON/HTML; the true total is always recorded |
+
+`--queue-size` bounds in-flight packets, not total process memory: flow state grows with distinct flows up to `--max-flows`, and report detail up to `--max-report-detail`.
+
+**Routing** in `mt` mode hashes the canonical five-tuple (endpoints sorted, so both directions agree), derives the load-balancer index and the worker index from independent parts of the hash so every worker is reachable, and pins each flow to one worker so flow state needs no locking. Flow *state* remains directional, matching the single-threaded engine.
+
+## Tests and benchmarks
+
+```bash
+python -m unittest discover -s tests                          # full suite, ~50 s
+DPI_SKIP_INSTALL_TEST=1 python -m unittest discover -s tests  # ~20 s; skips the clean-venv install test
+python samples/make_samples.py --check                        # samples match their generator byte-for-byte
+python benchmarks/bench.py                                    # throughput + classification agreement
+python tools/make_release.py                                  # local release archive under release/
+```
+
+The suite has 250 tests. Beyond unit tests per module, it covers: routing across all workers; order preservation with slow and out-of-order workers; queues smaller than the input; every stage failing with full queues; Ctrl-C injected at each lifecycle phase, including repeated interrupts and failing cleanup; simple/mt byte equivalence across rule sets and layouts; flow-capacity behaviour below, at and beyond the limit in both modes; hostile-string escaping in HTML; every exit code; and a fresh-virtualenv `pip install` followed by a `dpi-engine` smoke test. Concurrency tests use events and gates, not sleeps.
+
+Test fixtures are built by an independent packet crafter (`tests/fixtures.py`) with expectations stated by construction ("44 supported, 3 unsupported, 1 malformed"), so tests do not merely compare the engine against its own earlier output. The sample captures are fully synthetic, generated from IANA documentation address ranges; no real traffic was recorded.
+
+CI (`.github/workflows/ci.yml`) runs the suite on Linux and Windows across Python 3.8 to 3.13.
+
+The benchmark reports throughput and, separately, agreement with the generator's ground-truth labels on synthetic single-segment traffic. It is not a real-world accuracy measurement and the output says so.
+
+## Repository layout
+
+```
+dpi/                      the engine package
+  pcap_io.py              strict .pcap reader; atomic writer
+  packet_parser.py        Ethernet / IPv4 / TCP / UDP with full boundary checks
+  sni_extractor.py        TLS SNI, HTTP Host, DNS question extractors
+  inspection.py           shared classify + rule decision, detection log
+  connection_tracker.py   flow table with a shared global capacity
+  rule_manager.py         rules and rules-file parsing
+  engine.py               single-threaded engine (the reference)
+  engine_mt.py            multi-threaded engine
+  report.py               bounded JSON / escaped static HTML
+  cli.py, __main__.py     dpi-engine command, python -m dpi
+tests/                    250 unittest tests; fixtures.py is the independent packet crafter
+samples/                  synthetic captures, rule files, expected.json, sample reports
+docs/USAGE.md             concise usage guide and the supported-input contract
+docs/REVIEW_REPAIRS.md    review findings, root causes, resulting contracts
+benchmarks/               bench.py and the last measured run
+tools/make_release.py     builds a local wheel + source archive + SHA256SUMS
+demo.py                   runs the samples and writes demo_out/
+cli.py                    compatibility launcher for python cli.py
+```
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Rekh-225.
+MIT. See [`LICENSE`](LICENSE).
