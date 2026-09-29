@@ -165,6 +165,19 @@ class RuleManager:
         with self._lock:
             return port in self._blocked_ports
 
+    def get_blocked_ports(self) -> list[int]:
+        with self._lock:
+            return sorted(self._blocked_ports)
+
+    def describe(self) -> dict[str, list]:
+        """All rules currently in effect, in a JSON-friendly form."""
+        return {
+            "ips": sorted(self.get_blocked_ips()),
+            "apps": sorted(app.value for app in self.get_blocked_apps()),
+            "domains": sorted(self.get_blocked_domains()),
+            "ports": self.get_blocked_ports(),
+        }
+
     # -------------------------------------------------------------------------
     # Combined check
     # -------------------------------------------------------------------------

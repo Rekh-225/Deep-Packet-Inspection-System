@@ -1,0 +1,112 @@
+{
+  "machine": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "machine": "AMD64",
+    "processor": "AMD64 Family 25 Model 68 Stepping 1, AuthenticAMD",
+    "cpu_count": "12",
+    "python": "CPython 3.13.14",
+    "gil": "True",
+    "dpi_engine": "2.1.0"
+  },
+  "input": {
+    "path": "C:\\Users\\rehan\\AppData\\Local\\Temp\\dpi-bench-l6_t_4cp\\bench.pcap",
+    "bytes": 4132274,
+    "composition": {
+      "tls_flows": 3000,
+      "http_flows": 3000,
+      "dns_flows": 3000,
+      "reverse_flows": 3000,
+      "packets": 51000
+    },
+    "generator": {
+      "sites": 3000,
+      "bulk_acks": 10
+    }
+  },
+  "rules": [
+    "--block-app YouTube"
+  ],
+  "reps": 3,
+  "throughput": [
+    {
+      "config": "simple",
+      "packets": 51000,
+      "retained": 46875,
+      "rule_filtered": 4125,
+      "best_s": 1.0975,
+      "median_s": 1.1263,
+      "best_pps": 46469,
+      "best_MBps": 3.77,
+      "identical_to_simple": true
+    },
+    {
+      "config": "mt 1x1",
+      "packets": 51000,
+      "retained": 46875,
+      "rule_filtered": 4125,
+      "best_s": 1.7968,
+      "median_s": 1.8206,
+      "best_pps": 28383,
+      "best_MBps": 2.3,
+      "identical_to_simple": true
+    },
+    {
+      "config": "mt 1x2",
+      "packets": 51000,
+      "retained": 46875,
+      "rule_filtered": 4125,
+      "best_s": 1.7841,
+      "median_s": 1.8478,
+      "best_pps": 28586,
+      "best_MBps": 2.32,
+      "identical_to_simple": true
+    },
+    {
+      "config": "mt 2x2",
+      "packets": 51000,
+      "retained": 46875,
+      "rule_filtered": 4125,
+      "best_s": 1.8197,
+      "median_s": 1.8289,
+      "best_pps": 28027,
+      "best_MBps": 2.27,
+      "identical_to_simple": true
+    },
+    {
+      "config": "mt 2x4",
+      "packets": 51000,
+      "retained": 46875,
+      "rule_filtered": 4125,
+      "best_s": 1.8609,
+      "median_s": 1.9012,
+      "best_pps": 27406,
+      "best_MBps": 2.22,
+      "identical_to_simple": true
+    }
+  ],
+  "classification_agreement": {
+    "labelled_flows": 12000,
+    "agree": 12000,
+    "agreement_rate": 1.0,
+    "by_method": {
+      "tls_sni": {
+        "flows": 3000,
+        "agree": 3000
+      },
+      "none": {
+        "flows": 3000,
+        "agree": 3000
+      },
+      "http_host": {
+        "flows": 3000,
+        "agree": 3000
+      },
+      "dns_port": {
+        "flows": 3000,
+        "agree": 3000
+      }
+    },
+    "sample_mismatches": [],
+    "caveat": "Agreement with the generator's ground truth on synthetic, single-segment traffic whose names were chosen from the pattern table. Not a real-world accuracy measurement."
+  }
+}

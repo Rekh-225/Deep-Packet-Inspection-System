@@ -21,6 +21,10 @@ env/
 # Output files
 output.pcap
 *.pcap.bak
+*.pcap.partial
+demo_out/
+release/
+samples/captures/.tmp.pcap
 
 # OS
 .DS_Store
