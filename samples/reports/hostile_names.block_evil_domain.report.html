@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>DPI Engine report &mdash; samples/captures/hostile_names.pcap</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:1.5rem;color:#222;background:#fff}
+h1,h2{margin:.6em 0 .3em}
+.note{background:#fff8e1;border-left:4px solid #f0b429;padding:.6em .9em;margin:.8em 0}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+th,td{border:1px solid #ccd;padding:.3em .5em;text-align:left;vertical-align:top;word-break:break-all}
+th{background:#eef}
+tr.drop td{background:#fdecea}
+.unknown{color:#666;font-style:italic}
+.kv td:first-child{font-weight:600;width:16em}
+code{font-family:ui-monospace,Consolas,monospace}
+</style></head>
+<body>
+<h1>DPI Engine report</h1>
+<p class="note">Classification is a heuristic match of observed TLS SNI / HTTP Host / DNS query names and ports against a static pattern table. It indicates which service a flow appears to contact. It is not evidence that traffic is malicious. &#x27;Unknown&#x27; means no heuristic matched, nothing more.</p>
+<h2>Run</h2>
+<table class="kv"><tr><td>Mode</td><td>mt</td></tr><tr><td>Input</td><td>samples/captures/hostile_names.pcap</td></tr><tr><td>Output</td><td>demo_out/hostile_names.block_evil_domain.filtered.pcap</td></tr><tr><td>Threads</td><td>2 LB x 2 FP</td></tr><tr><td>Tool</td><td>dpi-engine 2.1.0</td></tr><tr><td>Generated</td><td>(not recorded)</td></tr></table>
+<h2>Rules in effect</h2>
+<table class="kv"><tr><td>ips</td><td>&mdash;</td></tr><tr><td>apps</td><td>&mdash;</td></tr><tr><td>domains</td><td>evil.test</td></tr><tr><td>ports</td><td>&mdash;</td></tr></table>
+<h2>Accounting</h2>
+<table class="kv"><tr><td>Total packets read</td><td>15</td></tr><tr><td>Total bytes</td><td>1737</td></tr><tr><td>Retained (written)</td><td>12</td></tr><tr><td>Rule-filtered</td><td>3</td></tr><tr><td>Unsupported (not inspected, not written)</td><td>0</td></tr><tr><td>Malformed (not written)</td><td>0</td></tr><tr><td>Failed / undecided</td><td>0</td></tr><tr><td>Reconciles</td><td>yes</td></tr></table>
+<p class="note">Unsupported (non-IPv4 TCP/UDP) and malformed packets were not inspected and are not in the output capture; they are counted here so the accounting reconciles.</p>
+<h2>Packets by heuristic class</h2>
+<table class="kv"><tr><td>HTTPS</td><td>10</td></tr><tr><td>Unknown</td><td>3</td></tr><tr><td>DNS</td><td>1</td></tr><tr><td>HTTP</td><td>1</td></tr></table>
+<h2>Flows (8 listed, 8 total; 3 dropped)</h2>
+
+<table>
+<thead><tr><th>#</th><th>Source</th><th>Destination</th><th>Proto</th><th>Pkts</th>
+<th>DNS query</th><th>HTTP Host</th><th>TLS SNI</th><th>Heuristic class</th><th>Matching rule</th><th>Action</th></tr></thead>
+<tbody><tr class="drop"><td>0</td><td><code>192.0.2.10:51000</code></td><td><code>203.0.113.13:443</code></td><td>TCP</td><td>3</td><td>&mdash;</td><td>&mdash;</td><td>&lt;script&gt;alert(1)&lt;/script&gt;.evil.test</td><td>HTTPS <small>(tls_sni)</small></td><td>domain: &lt;script&gt;alert(1)&lt;/script&gt;.evil.test</td><td>drop</td></tr><tr class="forward"><td>1</td><td><code>203.0.113.13:443</code></td><td><code>192.0.2.10:51000</code></td><td>TCP</td><td>1</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td><span class="unknown">Unknown (no heuristic matched)</span></td><td>&mdash;</td><td>forward</td></tr><tr class="drop"><td>4</td><td><code>192.0.2.10:51001</code></td><td><code>203.0.113.13:80</code></td><td>TCP</td><td>2</td><td>&mdash;</td><td>evil.test&quot;&gt;&lt;script&gt;alert(2)&lt;/script&gt;</td><td>&mdash;</td><td>HTTPS <small>(http_host)</small></td><td>domain: evil.test&quot;&gt;&lt;script&gt;alert(2)&lt;/script&gt;</td><td>drop</td></tr><tr class="drop"><td>6</td><td><code>192.0.2.10:51002</code></td><td><code>192.0.2.53:53</code></td><td>UDP</td><td>1</td><td>&lt;img src=x&gt;.evil.test</td><td>&mdash;</td><td>&mdash;</td><td>DNS <small>(dns_port)</small></td><td>domain: &lt;img src=x&gt;.evil.test</td><td>drop</td></tr><tr class="forward"><td>7</td><td><code>192.0.2.10:51003</code></td><td><code>203.0.113.13:443</code></td><td>TCP</td><td>3</td><td>&mdash;</td><td>&mdash;</td><td>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.long.test</td><td>HTTPS <small>(tls_sni)</small></td><td>&mdash;</td><td>forward</td></tr><tr class="forward"><td>8</td><td><code>203.0.113.13:443</code></td><td><code>192.0.2.10:51003</code></td><td>TCP</td><td>1</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td><span class="unknown">Unknown (no heuristic matched)</span></td><td>&mdash;</td><td>forward</td></tr><tr class="forward"><td>11</td><td><code>192.0.2.10:51004</code></td><td><code>203.0.113.13:443</code></td><td>TCP</td><td>3</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>HTTPS <small>(port_fallback)</small></td><td>&mdash;</td><td>forward</td></tr><tr class="forward"><td>12</td><td><code>203.0.113.13:443</code></td><td><code>192.0.2.10:51004</code></td><td>TCP</td><td>1</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td><span class="unknown">Unknown (no heuristic matched)</span></td><td>&mdash;</td><td>forward</td></tr></tbody>
+</table>
+</body></html>

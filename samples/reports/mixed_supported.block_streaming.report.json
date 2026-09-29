@@ -1,0 +1,819 @@
+{
+  "schema": "dpi-engine-report/1",
+  "tool": {
+    "name": "dpi-engine",
+    "version": "2.1.0"
+  },
+  "generated_at": null,
+  "run": {
+    "mode": "simple",
+    "input": "samples/captures/mixed_supported.pcap",
+    "output": "demo_out/mixed_supported.block_streaming.filtered.pcap"
+  },
+  "rules": {
+    "ips": [],
+    "apps": [
+      "Netflix",
+      "TikTok",
+      "YouTube"
+    ],
+    "domains": [],
+    "ports": []
+  },
+  "accounting": {
+    "total_packets": 44,
+    "total_bytes": 3258,
+    "tcp_packets": 41,
+    "udp_packets": 3,
+    "retained": 41,
+    "rule_filtered": 3,
+    "unsupported": 0,
+    "malformed": 0,
+    "failed": 0,
+    "reconciles": true
+  },
+  "packets_by_app": {
+    "HTTPS": 24,
+    "Unknown": 8,
+    "DNS": 3,
+    "HTTP": 2,
+    "Facebook": 1,
+    "GitHub": 1,
+    "Google": 1,
+    "Netflix": 1,
+    "TikTok": 1,
+    "Twitter/X": 1,
+    "YouTube": 1
+  },
+  "flows_by_app": {
+    "HTTPS": 8,
+    "Unknown": 8,
+    "DNS": 3,
+    "Facebook": 1,
+    "GitHub": 1,
+    "Google": 1,
+    "Netflix": 1,
+    "TikTok": 1,
+    "Twitter/X": 1,
+    "YouTube": 1
+  },
+  "flows_by_action": {
+    "forward": 23,
+    "drop": 3
+  },
+  "flows": {
+    "total": 26,
+    "listed": 26,
+    "truncated": false,
+    "max_flows": 1000,
+    "items": [
+      {
+        "first_packet_id": 0,
+        "last_packet_id": 3,
+        "src": {
+          "ip": "192.0.2.10",
+          "port": 50000
+        },
+        "dst": {
+          "ip": "198.51.100.1",
+          "port": 443
+        },
+        "protocol": "TCP",
+        "packets": 3,
+        "bytes": 246,
+        "observed": {
+          "tls_sni": "www.google.com",
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "Google",
+          "known": true,
+          "method": "tls_sni",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 1,
+        "last_packet_id": 1,
+        "src": {
+          "ip": "198.51.100.1",
+          "port": 443
+        },
+        "dst": {
+          "ip": "192.0.2.10",
+          "port": 50000
+        },
+        "protocol": "TCP",
+        "packets": 1,
+        "bytes": 54,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "Unknown",
+          "known": false,
+          "method": "none",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 4,
+        "last_packet_id": 7,
+        "src": {
+          "ip": "192.0.2.10",
+          "port": 50001
+        },
+        "dst": {
+          "ip": "198.51.100.2",
+          "port": 443
+        },
+        "protocol": "TCP",
+        "packets": 3,
+        "bytes": 247,
+        "observed": {
+          "tls_sni": "www.youtube.com",
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "YouTube",
+          "known": true,
+          "method": "tls_sni",
+          "heuristic": true
+        },
+        "rule": {
+          "type": "app",
+          "detail": "YouTube"
+        },
+        "action": "drop"
+      },
+      {
+        "first_packet_id": 5,
+        "last_packet_id": 5,
+        "src": {
+          "ip": "198.51.100.2",
+          "port": 443
+        },
+        "dst": {
+          "ip": "192.0.2.10",
+          "port": 50001
+        },
+        "protocol": "TCP",
+        "packets": 1,
+        "bytes": 54,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "Unknown",
+          "known": false,
+          "method": "none",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 8,
+        "last_packet_id": 11,
+        "src": {
+          "ip": "192.0.2.10",
+          "port": 50002
+        },
+        "dst": {
+          "ip": "198.51.100.3",
+          "port": 443
+        },
+        "protocol": "TCP",
+        "packets": 3,
+        "bytes": 248,
+        "observed": {
+          "tls_sni": "www.facebook.com",
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "Facebook",
+          "known": true,
+          "method": "tls_sni",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 9,
+        "last_packet_id": 9,
+        "src": {
+          "ip": "198.51.100.3",
+          "port": 443
+        },
+        "dst": {
+          "ip": "192.0.2.10",
+          "port": 50002
+        },
+        "protocol": "TCP",
+        "packets": 1,
+        "bytes": 54,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "Unknown",
+          "known": false,
+          "method": "none",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 12,
+        "last_packet_id": 15,
+        "src": {
+          "ip": "192.0.2.10",
+          "port": 50003
+        },
+        "dst": {
+          "ip": "198.51.100.4",
+          "port": 443
+        },
+        "protocol": "TCP",
+        "packets": 3,
+        "bytes": 243,
+        "observed": {
+          "tls_sni": "twitter.com",
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "Twitter/X",
+          "known": true,
+          "method": "tls_sni",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 13,
+        "last_packet_id": 13,
+        "src": {
+          "ip": "198.51.100.4",
+          "port": 443
+        },
+        "dst": {
+          "ip": "192.0.2.10",
+          "port": 50003
+        },
+        "protocol": "TCP",
+        "packets": 1,
+        "bytes": 54,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "Unknown",
+          "known": false,
+          "method": "none",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 16,
+        "last_packet_id": 19,
+        "src": {
+          "ip": "192.0.2.10",
+          "port": 50004
+        },
+        "dst": {
+          "ip": "198.51.100.5",
+          "port": 443
+        },
+        "protocol": "TCP",
+        "packets": 3,
+        "bytes": 247,
+        "observed": {
+          "tls_sni": "www.netflix.com",
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "Netflix",
+          "known": true,
+          "method": "tls_sni",
+          "heuristic": true
+        },
+        "rule": {
+          "type": "app",
+          "detail": "Netflix"
+        },
+        "action": "drop"
+      },
+      {
+        "first_packet_id": 17,
+        "last_packet_id": 17,
+        "src": {
+          "ip": "198.51.100.5",
+          "port": 443
+        },
+        "dst": {
+          "ip": "192.0.2.10",
+          "port": 50004
+        },
+        "protocol": "TCP",
+        "packets": 1,
+        "bytes": 54,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "Unknown",
+          "known": false,
+          "method": "none",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 20,
+        "last_packet_id": 23,
+        "src": {
+          "ip": "192.0.2.10",
+          "port": 50005
+        },
+        "dst": {
+          "ip": "198.51.100.6",
+          "port": 443
+        },
+        "protocol": "TCP",
+        "packets": 3,
+        "bytes": 242,
+        "observed": {
+          "tls_sni": "github.com",
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "GitHub",
+          "known": true,
+          "method": "tls_sni",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 21,
+        "last_packet_id": 21,
+        "src": {
+          "ip": "198.51.100.6",
+          "port": 443
+        },
+        "dst": {
+          "ip": "192.0.2.10",
+          "port": 50005
+        },
+        "protocol": "TCP",
+        "packets": 1,
+        "bytes": 54,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "Unknown",
+          "known": false,
+          "method": "none",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 24,
+        "last_packet_id": 27,
+        "src": {
+          "ip": "192.0.2.10",
+          "port": 50006
+        },
+        "dst": {
+          "ip": "198.51.100.7",
+          "port": 443
+        },
+        "protocol": "TCP",
+        "packets": 3,
+        "bytes": 246,
+        "observed": {
+          "tls_sni": "www.tiktok.com",
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "TikTok",
+          "known": true,
+          "method": "tls_sni",
+          "heuristic": true
+        },
+        "rule": {
+          "type": "app",
+          "detail": "TikTok"
+        },
+        "action": "drop"
+      },
+      {
+        "first_packet_id": 25,
+        "last_packet_id": 25,
+        "src": {
+          "ip": "198.51.100.7",
+          "port": 443
+        },
+        "dst": {
+          "ip": "192.0.2.10",
+          "port": 50006
+        },
+        "protocol": "TCP",
+        "packets": 1,
+        "bytes": 54,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "Unknown",
+          "known": false,
+          "method": "none",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 28,
+        "last_packet_id": 31,
+        "src": {
+          "ip": "192.0.2.10",
+          "port": 50007
+        },
+        "dst": {
+          "ip": "198.51.100.8",
+          "port": 443
+        },
+        "protocol": "TCP",
+        "packets": 3,
+        "bytes": 247,
+        "observed": {
+          "tls_sni": "www.example.org",
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "HTTPS",
+          "known": true,
+          "method": "tls_sni",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 29,
+        "last_packet_id": 29,
+        "src": {
+          "ip": "198.51.100.8",
+          "port": 443
+        },
+        "dst": {
+          "ip": "192.0.2.10",
+          "port": 50007
+        },
+        "protocol": "TCP",
+        "packets": 1,
+        "bytes": 54,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "Unknown",
+          "known": false,
+          "method": "none",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 32,
+        "last_packet_id": 33,
+        "src": {
+          "ip": "192.0.2.10",
+          "port": 50008
+        },
+        "dst": {
+          "ip": "198.51.100.20",
+          "port": 80
+        },
+        "protocol": "TCP",
+        "packets": 2,
+        "bytes": 183,
+        "observed": {
+          "tls_sni": null,
+          "http_host": "example.com",
+          "dns_query": null
+        },
+        "classification": {
+          "app": "HTTPS",
+          "known": true,
+          "method": "http_host",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 34,
+        "last_packet_id": 35,
+        "src": {
+          "ip": "192.0.2.10",
+          "port": 50009
+        },
+        "dst": {
+          "ip": "198.51.100.21",
+          "port": 80
+        },
+        "protocol": "TCP",
+        "packets": 2,
+        "bytes": 183,
+        "observed": {
+          "tls_sni": null,
+          "http_host": "httpbin.org",
+          "dns_query": null
+        },
+        "classification": {
+          "app": "HTTPS",
+          "known": true,
+          "method": "http_host",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 36,
+        "last_packet_id": 36,
+        "src": {
+          "ip": "192.0.2.10",
+          "port": 50010
+        },
+        "dst": {
+          "ip": "192.0.2.53",
+          "port": 53
+        },
+        "protocol": "UDP",
+        "packets": 1,
+        "bytes": 74,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": "www.google.com"
+        },
+        "classification": {
+          "app": "DNS",
+          "known": true,
+          "method": "dns_port",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 37,
+        "last_packet_id": 37,
+        "src": {
+          "ip": "192.0.2.10",
+          "port": 50011
+        },
+        "dst": {
+          "ip": "192.0.2.53",
+          "port": 53
+        },
+        "protocol": "UDP",
+        "packets": 1,
+        "bytes": 75,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": "www.youtube.com"
+        },
+        "classification": {
+          "app": "DNS",
+          "known": true,
+          "method": "dns_port",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 38,
+        "last_packet_id": 38,
+        "src": {
+          "ip": "192.0.2.10",
+          "port": 50012
+        },
+        "dst": {
+          "ip": "192.0.2.53",
+          "port": 53
+        },
+        "protocol": "UDP",
+        "packets": 1,
+        "bytes": 75,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": "api.twitter.com"
+        },
+        "classification": {
+          "app": "DNS",
+          "known": true,
+          "method": "dns_port",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 39,
+        "last_packet_id": 39,
+        "src": {
+          "ip": "192.0.2.66",
+          "port": 50013
+        },
+        "dst": {
+          "ip": "198.51.100.99",
+          "port": 443
+        },
+        "protocol": "TCP",
+        "packets": 1,
+        "bytes": 54,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "HTTPS",
+          "known": true,
+          "method": "port_fallback",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 40,
+        "last_packet_id": 40,
+        "src": {
+          "ip": "192.0.2.66",
+          "port": 50014
+        },
+        "dst": {
+          "ip": "198.51.100.99",
+          "port": 443
+        },
+        "protocol": "TCP",
+        "packets": 1,
+        "bytes": 54,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "HTTPS",
+          "known": true,
+          "method": "port_fallback",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 41,
+        "last_packet_id": 41,
+        "src": {
+          "ip": "192.0.2.66",
+          "port": 50015
+        },
+        "dst": {
+          "ip": "198.51.100.99",
+          "port": 443
+        },
+        "protocol": "TCP",
+        "packets": 1,
+        "bytes": 54,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "HTTPS",
+          "known": true,
+          "method": "port_fallback",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 42,
+        "last_packet_id": 42,
+        "src": {
+          "ip": "192.0.2.66",
+          "port": 50016
+        },
+        "dst": {
+          "ip": "198.51.100.99",
+          "port": 443
+        },
+        "protocol": "TCP",
+        "packets": 1,
+        "bytes": 54,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "HTTPS",
+          "known": true,
+          "method": "port_fallback",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      },
+      {
+        "first_packet_id": 43,
+        "last_packet_id": 43,
+        "src": {
+          "ip": "192.0.2.66",
+          "port": 50017
+        },
+        "dst": {
+          "ip": "198.51.100.99",
+          "port": 443
+        },
+        "protocol": "TCP",
+        "packets": 1,
+        "bytes": 54,
+        "observed": {
+          "tls_sni": null,
+          "http_host": null,
+          "dns_query": null
+        },
+        "classification": {
+          "app": "HTTPS",
+          "known": true,
+          "method": "port_fallback",
+          "heuristic": true
+        },
+        "rule": null,
+        "action": "forward"
+      }
+    ]
+  },
+  "detail": {
+    "limit": 10000,
+    "detections_total": 13,
+    "detections_listed": 11,
+    "detections_truncated": false
+  },
+  "notes": [
+    "Classification is a heuristic match of observed TLS SNI / HTTP Host / DNS query names and ports against a static pattern table. It indicates which service a flow appears to contact. It is not evidence that traffic is malicious. 'Unknown' means no heuristic matched, nothing more.",
+    "Unsupported (non-IPv4 TCP/UDP) and malformed packets were not inspected and are not in the output capture; they are counted here so the accounting reconciles."
+  ]
+}
